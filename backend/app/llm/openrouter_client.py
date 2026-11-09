@@ -5,6 +5,7 @@ Wrapper رفيع حوالين OpenRouter (Tech-Stack.md قسم 4 — المود�
 - المحادثة: openai SDK (OpenAI-compatible) على نفس الـbase URL بـOPENROUTER_API_KEY.
 """
 
+import time
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 
@@ -15,6 +16,8 @@ from app.core.config import get_settings
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _MODELS_TIMEOUT_SECONDS = 15
+_MODELS_CACHE_TTL_SECONDS = 300
+_models_cache: tuple[float, list[dict]] | None = None
 # سقف لطول الرد: موديل مجاني داخل في loop مايفضلش ماسك الـconnection والـworker من غير نهاية.
 # عالي بما يكفي لموديلات الـreasoning (الـreasoning tokens بتتحسب من نفس الحد).
 _MAX_OUTPUT_TOKENS = 2048
@@ -28,22 +31,36 @@ def _get_client() -> AsyncOpenAI:
     )
 
 
-async def list_free_models() -> list[dict]:
+async def list_free_models(force_refresh: bool = False) -> list[dict]:
     """
-    يرجّع الموديلات المجانية من OpenRouter: [{"id", "name", "context_length"}].
+    يرجّع الموديلات المجانية النصية من OpenRouter: [{"id", "name", "context_length"}].
+
+    النتيجة متخزنة in-memory بـTTL خمس دقايق — /chat بيحقق منها في كل request،
+    والـcache بيمنع إن كل رسالة تصرف request لـOpenRouter. `force_refresh=True`
+    بيتخطّى الـcache لو محتاجين قائمة حديثة.
 
     Raises:
         httpx.HTTPError: OpenRouter مش متاح أو رجّع status غلط.
         ValueError, KeyError: OpenRouter رجّع 200 بس بشكل مش متوقع.
     """
+    global _models_cache
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _models_cache is not None
+        and now - _models_cache[0] < _MODELS_CACHE_TTL_SECONDS
+    ):
+        return list(_models_cache[1])
     async with httpx.AsyncClient(timeout=_MODELS_TIMEOUT_SECONDS) as client:
         response = await client.get(f"{OPENROUTER_BASE_URL}/models")
         response.raise_for_status()
-    return [
+    models = [
         {"id": model["id"], "name": model["name"], "context_length": model["context_length"]}
         for model in response.json()["data"]
-        if _is_free(model["pricing"])
+        if _is_free(model["pricing"]) and _is_text_chat(model.get("architecture") or {})
     ]
+    _models_cache = (now, models)
+    return list(models)
 
 
 def _is_free(pricing: dict) -> bool:
@@ -53,6 +70,15 @@ def _is_free(pricing: dict) -> bool:
     if pricing.get("overrides"):
         return False
     return all(float(price) == 0 for key, price in pricing.items() if key != "overrides")
+
+
+def _is_text_chat(architecture: dict) -> bool:
+    # موديلات النص بس: الـoutput لازم يكون نصي بالكامل (بيستبعد موديلات الـaudio
+    # زي Lyria)، والـinput لازم يقبل text (موديلات الـvision النصية عادية —
+    # إحنا بنبعت text بس).
+    inputs = architecture.get("input_modalities") or []
+    outputs = architecture.get("output_modalities") or []
+    return "text" in inputs and outputs == ["text"]
 
 
 async def stream_chat_completion(model: str, messages: list[dict]) -> AsyncGenerator[str, None]:

@@ -139,3 +139,64 @@
 3. `profiles` و`auth.users` **فاضيين** في الداتابيز الحقيقية، مع إن `docs/demo-accounts.md` بيوصف 3 حسابات. من غير profiles مفيش محادثة تتعمل (foreign key). ماعملناش seed لأنها بيانات auth برا نطاق المهمة.
 
 **الحالة:** ⚠️ تم جزئياً — الكود كله اتكتب واتجرّب في كل حتة ينفع تتجرّب دلوقتي. مسار الـstreaming + الحفظ + الـdenial بتاع `/chat` ماتجرّبش end-to-end لسه بسبب الـ 3 blockers اللي فوق. والـTEMPORARY markers الاتنين فجوات مقصودة للمراحل الجاية.
+
+---
+
+## 2026-11-09 — Phase 1: متابعات على هيكل الـbackend (idempotency في /chat + cache + text filter + موديل محدد للاختبار)
+
+> متابعة مباشرة لـentry "Phase 1: هيكل الـFastAPI backend" — 5 إصلاحات معتمدة بالظبط، والنطاق محصور في `chat.py` و`openrouter_client.py` و`test_chat_endpoint.py`.
+
+**تم:**
+1. **تأجيل الكتابة لحد بعد الـretrieval** (`chat.py`): الـconversation-create وinsert رسالة الـuser بقوا بعد ما `retrieve_chunks()` ينجح. لو الـretrieval فشل أو رجّع `PermissionDeniedError`، مفيش أي صف بيتكتب في `conversations` أو `messages` — الـclient بيستلم الـdenied/error من غير orphan rows. قبل كده، الـdenial كان بيسيب محادثة جديدة برسالة user من غير رد.
+2. **الـretrieval failure بقى SSE `error` مش 500 خام** (`chat.py`): الـcall بتاع `retrieve_chunks` متغلف بـtry/except — `PermissionDeniedError` الأول (denied)، وأي exception تاني (داتابيز، Gemini embedding، أي حاجة) بيتسجل بـ`logger.exception` على الـserver وبيطلع `event: error` بنفس شكل الـevent بتاع OpenRouter، من غير ما يكشف تفاصيل داخلية للـclient. الـmessage بتاعه في constant ‏`RETRIEVAL_ERROR_MESSAGE`.
+3. **Cache بـTTL 5 دقايق لـ`list_free_models()`** (`openrouter_client.py`): النتيجة بتتخزن in-memory (`time.monotonic` — مش wall clock عشان تغيّرات ساعة النظام مأثراش) وبتترجع copy سطحية. `/chat` (عن طريق `require_free_model` → `fetch_free_models_or_502`) بقى مبيرفعش request لـOpenRouter على كل رسالة.
+4. **فلترة الموديلات غير النصية** (`openrouter_client.py`): `_is_text_chat()` بتفحص `architecture` من رد `/models` — الـoutput لازم يكون نصي بالكامل (`output_modalities == ["text"]`) والـinput لازم يقبل `text`. ده استبعد موديلات الـaudio (Lyria الاتنين). موديلات الـvision (input فيه image + output نص) بتفضل عادي لأننا بنبعت text بس.
+5. **موديل محدد ومسمّى في الاختبار** (`test_chat_endpoint.py`): `openrouter/free` (الـauto-router اللي بيختار موديل عشوائي وممكن يرجّع رد فاضي أو rate limit) اتبدّل بـ`nvidia/nemotron-3.5-lightning:free` — متجرّب live إنه بيرجّع محتوى غير فاضي بـstreaming.
+
+**قرار الـcache bypass (كان مطلوب اتخذه):** الـcache بيشمل `GET /models` نفسه مش `/chat` بس، ومفيش bypass متطبق فعلاً دلوقتي. السبب: `models.py` برا نطاق المهمة، والاتنين (`GET /models` و`require_free_model`) بيعدّوا على نفس `list_free_models()` — لو الـendpoint فضل fresh والـchat check فضل stale، الـdropdown ممكن يورّي موديل الـ`/chat` يرفضه لحد 5 دقايق. cache واحد للاتنين = اتساق. `force_refresh: bool = False` متوفرة كـparameter لما يتريد تحديث القائمة قسرياً (مثلاً لما `models.py` يتبنى عليها في مهمة لاحقة).
+
+**تغيير سلوك مرئي للـfrontend:** الـdenied لمحادثة **جديدة** مبيرجعش `X-Conversation-Id` خالص (مفيش حاجة اتعملت في الداتابيز أصلاً)، والـdenied لمحادثة موجودة مبيرجعش الـid بتاعها. الـclient محتاج يتعامل مع الـdenied/error كـ"مفيش حاجة اتحفظت" — مش "اتحفظت نص". للمحادثة الموجودة، فحص الملكية (404) لسه بيحصل قبل الـretrieval كقراية بس، عشان الـ404 يرجع قبل ما نصرف embedding.
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/api/chat.py — تأجيل الكتابة بعد الـretrieval، try/except حوالين `retrieve_chunks` بـerror event مسجّل، `_resolve_conversation` اتقسمت لفحص ملكية (قراية، بدري) + `_create_conversation` (كتابة، متأخرة)، `_sse_response` بقت تقبل `UUID | None` وتبعت الـheader بس لو فيه conversation
+- backend/app/llm/openrouter_client.py — cache بـTTL 5 دقايق + `force_refresh`، فلتر `_is_text_chat()` على `architecture`
+- backend/scripts/test_chat_endpoint.py — `CHAT_MODEL` بقى موديل مسمّى، حالة الـdenial بقت بتتأكد إن مفيش كتابة خالص (قبل/بعد في عدد المحادثات + عدم وجود الـheader)، والـdocstring اتحيّن (عدد الـrequests المستهلكة)
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- **اتجرّب فعلاً (من غير profiles):** الجلب fresh ‏1.36s مقابل cached ‏0.0000s بنفس القائمة (الـcache شغال)، القائمة 16 → 14 موديل بعد فلتر النص (Lyria اختفت)، `GET /models` رجّع 200، الموديل المدفوع 422، الـdenial طلع event واحد `denied` من غير header ومن غير أي كتابة، والـretrieval failure طلع `event: error` ‏200 مع traceback كامل في اللوج (اتجرّب بـ`DATABASE_URL` مكسورة عمداً في subprocess منفصل). كمان اتأكدنا إن `user_id` مش موجود بيرجّع 404 بعد نجاح الـretrieval ومن غير أي صف يتكتب.
+- **Blockers القديمة:** رقم 1 (الـkeys) ورقم 2 (migration 001) اتحلّوا من الدورة اللي فاتت — اتأكدنا إن عمود `sources` موجود فعلاً. رقم 3 (`profiles`/`auth.users` فاضيين) لسه قايم؛ اتعرض عمل seed للـdemo accounts بالـAdmin API واترفض، فالـstreaming + الحفظ مازالوا ماتجرّبوش end-to-end.
+- **ملاحظة مكتشفة أثناء الاختبار (برا النطاق):** `retrieve_chunks` بيحسب الـembedding **قبل** ما يجرب يفتح اتصال الداتابيز — يعني فشل الداتابيز بيصرف request من Gemini على الفاضي. المصدر retrieval.py (برا النطاق هنا)؛ يتحط في اعتبار مهمة الـretrieval الجاية.
+- **Clean Code Guard:** مفيش imports مش مستخدمة (AST pass زي المرة اللي فاتت). اللي اتصلح أثناء الـpass: أول صياغة لحالة الـdenial في الاختبار كانت بتقرا أول محادثة عند الـhr — كانت هتفشل لو ليه محادثات قديمة، فبقت قبل/بعد زي حالة الموديل المدفوع. المتعلّم عليه: `force_refresh` ‏boolean flag من غير caller في الـrepo لحد ما `models.py` يتبنى عليه (مطلوب صراحة في المهمة)، و`chat()` بقت ~28 سطر (flow خطي، زي ما اتقرر على `_stream_grounded_answer` قبل كده).
+- **Code Security:** مفيش SQL جديد (كل الكتابة لسه بـbind params في conversation_store)؛ رسالة الـerror مش بتكشف تفاصيل داخلية؛ الـexception بيتسجل في اللوج بس من غير message الموظف؛ الـcache في الـmemory للعملية بس ومفيهاش أسرار؛ `time.monotonic` محصّنة ضد تغيّرات ساعة النظام. المخاطر المفتوحة من المهمة اللي فاتت زي ما هي (الـrole/user_id مش موثقين، مفيش rate limiting) — دي متأثرة بالتغييرات دي ولا التغييرات أثّرت عليها.
+- **Test Guard:** الاختبارات لسه من غير mocks على داتابيز وOpenRouter حقيقيين، وكل حالة بتمسك bug مختلف. حالة الـdenial بقت أقوى (بتثبت عدم الكتابة بدل ما بتثبت حفظ رسالة user من غير رد). الاختبار نفسه مازال manual script — تحويله pytest لما الـtest suite تتبني.
+- **ملاحظة على موديل الاختبار:** الموديلات المجانية بتتغير من غير إنذار (PRD قسم 12) — لو `nvidia/nemotron-3.5-lightning:free` اختفى من الطبقة المجانية، الحالة الأولى في السكريبت هتفشل برسالة واضحة، والتبديل سطر واحد في `CHAT_MODEL`.
+
+**الحالة:** ✅ تم — الـ5 إصلاحات اتنفذوا واتجرّبوا بكل الطرق المتاحة من غير seed. مسار الـstreaming + الحفظ لسه محتاج الـdemo accounts (blocker 3) قبل اختبار end-to-end كامل.
+
+---
+
+## 2026-11-09 — Phase 1: سكريبت seed للـdemo accounts (قفل blocker 3)
+
+> متابعة لـentry "هيكل الـFastAPI backend" — الـblocker رقم 3 (`profiles`/`auth.users` فاضيين مع إن `demo-accounts.md` بيوصف 3 حسابات). المهمة دي بتحوّل الـseed من "خطوة يدوية في Dashboard" لسكريبت idempotent في الـrepo.
+
+**تم:**
+- سكريبت `backend/scripts/seed_demo_accounts.py` بيعمل الحسابات الثلاثة الموثقة في `docs/demo-accounts.md` (admin/sales/hr — `@reelestate.demo`، كلهم `Demo@2026!`):
+  1. مستخدم Auth عن طريق `supabase.auth.admin.create_user()` بـ**service_role** key (من `get_supabase()`) — بـ`email_confirm=True` عشان من غير تحقق إيميل.
+  2. صف مطابق في `profiles` (id بتاع المستخدم + role + full_name مشتق من الـrole زي "Sales Demo User").
+- **Idempotency:** قبل أي إنشاء، بيدوّر على المستخدم بالإيميل في `auth.users` (عن طريق `list_users` بصفحات 50). موجود → بيتخطى من غير خطأ ولا تكرار، وبس بيتأكد إن صف الـprofiles موجود. لو الـcreate فشل (سباق مع تشغيل تاني)، بيرجّع يدوّر عليه: لقيناه → يتحسب existed، ملقيناهوش → الـexception بيرجّع زي ما هو. صف profiles موجود بيسيب زي ما هو (مفيش تعديل).
+- **ملخص في الآخر:** كل حساب وحالته (`created` / `existed (profiles ensured)` / `FAILED: ...`)، والـexit code ‏1 لو أي حساب فشل مع دعوة لإعادة التشغيل (السكريبت idempotent فمفيش ضرر من إعادة المحاولة). الفشل في حساب مابيوقفش الباقي.
+- مفيش dependency جديدة — `supabase==2.34.0` كان متسطب ومتسجل في `requirements.txt` أصلاً.
+
+**ملفات اتعملت/اتعدلت:**
+- backend/scripts/seed_demo_accounts.py — سكريبت جديد (ملف المهمة الوحيد في الكود)
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- **الباسورد hardcoded في السكريبت مش في `.env`:** عمداً — `demo-accounts.md` مش secret (Tech-Stack قسم 11 بيقول ده صراحة)، وحطه في `.env` هيخلي السكريبت يتطلب إعداد زيادة من غير فايدة أمنية (بيانات وهمية بالكامل). الثوابت في السكريبت بتشاور على الـdoc كمصدر للحقيقة — لو الحسابات اتغيرت هناك لازم تتغير هنا.
+- **صف الـprofiles بيعمل select-then-insert** (زي pattern الـupsert في ingest.py) — مش atomic، فسباق حقيقي بين تشغيلين متوازيين ممكن يضرب unique violation على المفتاح. مقبول لسكريبت يدوي؛ وبالمقابل الـauth user نفسه محمي من التكرار (إيميل unique في Supabase).
+- **الدوّر بالإيميل مش get-by-email:** الـadmin API مفيهوش `get_user_by_email` — فيه `list_users` بصفحات و`get_user_by_id` بس. بثلاثة حسابات (والمتوقع عدد قليل من الموظفين)، اللف على الصفحات رخيص.
+- **Code Security:** الـservice_role key بيقرا من الـenv عن طريق `get_supabase()` الحالية ومش بيظهر في أي output (رسايل الفشل من الـAPI مش بتشمل headers). مفيش SQL خام — كل الكتابة عن طريق الـSupabase client (parameterized جوّه postgrest). `email_confirm=True` هو ده الغرض أصلاً (حسابات demo من غير إيميلات حقيقية — الدومين وهمي)، والسكريبت manual-only مش endpoint.
+- **Clean Code Guard:** كل الدوال ≤ 15 سطر، مفيش boolean flags، و`except Exception` الوحيد في `main()` مقصود وموثّق (يكمل الحسابات الباقية ويرجّع فشل في الآخر). مفيش imports مش مستخدمة (AST pass). السكريبت مافيهوش أي تنفيذ عند الـimport — كل الشغل جوه `main()` (اتأكدنا بـimport فعلي).
+- **ماتجرّبش run فعلي:** المفروض المستخدم هو اللي يشغّله (ده اللي المهمة طلبته). اللي اتعمل: compile + import نظيف + مراجعة الـAPI المستخدمة من الـpackage المتسطب نفسه (`create_user(AdminUserAttributes)` بـ`email_confirm`، و`list_users(page, per_page)` — الاتنين متأكدين منهم من الكود المتبّت). التشغيل الفعلي هيأكد الباقي، ولو فشل في أي حساب هيقول أيه واللي بعده بيكمل.
+- **بعد التشغيل الناجح:** blocker 3 هيتقفل، وساعتها `python -m scripts.test_chat_endpoint` (بعد `OPENROUTER_API_KEY` وmigration 001 اللي اتحلوا) يبقى قادر يعدي مسار الـstreaming + الحفظ end-to-end لأول مرة.
+
+**الحالة:** ⚠️ تم جزئياً — السكريبت كتب واتراجع (Code Security + Clean Code Guard) بس محتاج تشغيل فعلي للتأكيد: `python -m scripts.seed_demo_accounts` (من `backend/` والـvenv مفعّلة).

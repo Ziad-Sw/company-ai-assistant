@@ -5,9 +5,14 @@ POST /chat — سؤال الموظف → retrieval بالصلاحيات → إج
 ماتكسرش الـSSE framing:
     event: token   data: {"text": "..."}         مرة أو أكتر
     event: done    data: {"sources": [...]}      آخر event في أي رد اتحفظ
-    event: denied  data: {"message": "..."}      event واحد بس، من غير LLM ومن غير ما رد يتحفظ
-    event: error   data: {"message": "..."}      OpenRouter فشل؛ الرد مش بيتحفظ
-الـconversation_id بيرجع في header ‏X-Conversation-Id (الـclient محتاجه لو المحادثة جديدة).
+    event: denied  data: {"message": "..."}      event واحد بس، من غير LLM
+    event: error   data: {"message": "..."}      الـretrieval أو OpenRouter فشل؛ الرد مش بيتحفظ
+
+الـdenied والـerror معناهم إن **مفيش أي كتابة حصلت** في conversations أو messages —
+المحادثة الجديدة بتتعمل ورسالة الموظف بتتحفظ بعد ما الـretrieval ينجح بس
+(مفيش orphan rows). الـconversation_id بيرجع في header ‏X-Conversation-Id
+(الـclient محتاجه لو المحادثة جديدة) — ومش موجود في الـdenied/error لمحادثة جديدة
+لأن مفيش حاجة اتعملت أصلاً.
 """
 
 import json
@@ -42,6 +47,7 @@ router = APIRouter(tags=["chat"])
 TOP_K = 5
 TITLE_MAX_CHARS = 50
 MESSAGE_MAX_CHARS = 4000
+RETRIEVAL_ERROR_MESSAGE = "حصل خطأ في البحث في بيانات الشركة — جرّب تاني."
 
 
 class ChatRequest(BaseModel):
@@ -89,9 +95,12 @@ async def require_free_model(body: ChatRequest) -> ChatRequest:
 
 @router.post("/chat")
 def chat(body: Annotated[ChatRequest, Depends(require_free_model)]) -> StreamingResponse:
-    """سؤال → حفظ الرسالة → retrieval بالصلاحيات → رد streaming (راجع بروتوكول الـSSE فوق)."""
-    conversation_id = _resolve_conversation(body)
-    add_message(conversation_id, "user", body.message, sources=[])
+    """سؤال → retrieval بالصلاحيات → حفظ → رد streaming (راجع بروتوكول الـSSE فوق)."""
+    # قراية بس عشان الـ404 يرجع قبل ما نصرف embedding على request هيترفض عادي.
+    if body.conversation_id is not None and find_conversation(
+        body.conversation_id, body.user_id
+    ) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="المحادثة مش موجودة.")
 
     try:
         # TEMPORARY: naive retrieval, replace with LangGraph agent's category routing in the next phase
@@ -99,7 +108,16 @@ def chat(body: Annotated[ChatRequest, Depends(require_free_model)]) -> Streaming
             query=body.message, role=body.role, category=body.category, top_k=TOP_K
         )
     except PermissionDeniedError as exc:
-        return _sse_response(conversation_id, [_sse_event("denied", {"message": str(exc)})])
+        return _sse_response(body.conversation_id, [_sse_event("denied", {"message": str(exc)})])
+    except Exception:
+        logger.exception("Retrieval failed (role=%s, category=%s)", body.role, body.category)
+        return _sse_response(
+            body.conversation_id, [_sse_event("error", {"message": RETRIEVAL_ERROR_MESSAGE})]
+        )
+
+    # الـretrieval نجح — بعد كده بس المنشأة الجديدة ورسالة الموظف بيتكتبوا.
+    conversation_id = body.conversation_id or _create_conversation(body)
+    add_message(conversation_id, "user", body.message, sources=[])
 
     if not chunks:
         add_message(conversation_id, "assistant", NOT_FOUND_MESSAGE, sources=[])
@@ -113,18 +131,14 @@ def chat(body: Annotated[ChatRequest, Depends(require_free_model)]) -> Streaming
     )
 
 
-def _resolve_conversation(body: ChatRequest) -> UUID:
-    """محادثة جديدة لو مفيش conversation_id، غير كده لازم تكون موجودة وبتاعة نفس الموظف."""
-    if body.conversation_id is None:
-        try:
-            return create_conversation(body.user_id, title=body.message[:TITLE_MAX_CHARS])
-        except IntegrityError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="الموظف ده مش موجود."
-            ) from exc
-    if find_conversation(body.conversation_id, body.user_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="المحادثة مش موجودة.")
-    return body.conversation_id
+def _create_conversation(body: ChatRequest) -> UUID:
+    """محادثة جديدة بالـtitle = أول 50 حرف من السؤال."""
+    try:
+        return create_conversation(body.user_id, title=body.message[:TITLE_MAX_CHARS])
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="الموظف ده مش موجود."
+        ) from exc
 
 
 async def _stream_grounded_answer(
@@ -172,10 +186,9 @@ def _sse_event(event: str, payload: dict) -> str:
 
 
 def _sse_response(
-    conversation_id: UUID, events: Iterable[str] | AsyncGenerator[str, None]
+    conversation_id: UUID | None, events: Iterable[str] | AsyncGenerator[str, None]
 ) -> StreamingResponse:
-    return StreamingResponse(
-        events,
-        media_type="text/event-stream",
-        headers={"X-Conversation-Id": str(conversation_id), "Cache-Control": "no-cache"},
-    )
+    headers = {"Cache-Control": "no-cache"}
+    if conversation_id is not None:
+        headers["X-Conversation-Id"] = str(conversation_id)
+    return StreamingResponse(events, media_type="text/event-stream", headers=headers)

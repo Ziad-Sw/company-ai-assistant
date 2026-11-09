@@ -10,7 +10,8 @@
   - موظف sales وموظف hr على الأقل في profiles (docs/demo-accounts.md)
 
 بيستهلك: 1 request من Gemini embedding، و1 chat request من الـ50 المجانية في اليوم
-بتاعة OpenRouter، و4 requests لـ/models. المحادثات اللي بيعملها بتتمسح في الآخر.
+بتاعة OpenRouter، وقائمة /models بتتجلب من OpenRouter مرة واحدة (بتتخزن in-memory
+بـ5 دقايق). المحادثات اللي بيعملها بتتمسح في الآخر.
 الـexit code: 0 لو كله نجح، 1 لو أي حالة فشلت، 2 لو المتطلبات مش جاهزة.
 """
 
@@ -28,7 +29,9 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.db.session import get_session_factory
 
-CHAT_MODEL = "openrouter/free"
+# موديل محدد ومسمّى مش الـauto-router (openrouter/free): الـrouter بيختار موديل
+# عشوائي وممكن يرجّع رد فاضي أو rate limit، فالاختبار بيبقى غير deterministic.
+CHAT_MODEL = "nvidia/nemotron-3.5-lightning:free"
 PAID_MODEL = "openai/gpt-4o"
 PAYMENT_QUESTION = "ما هي نسبة الدفعة المقدمة في خطة التقسيط A؟"
 PROPERTY_QUESTION = "Is there a fully finished villa with a private garden available?"
@@ -141,7 +144,9 @@ def case_sales_chat_streams_and_persists(client: TestClient, user_id: UUID) -> b
 
 
 def case_hr_property_listings_denied(client: TestClient, user_id: UUID) -> bool:
-    """HR → property_listings: event واحد denied، ومفيش رد assistant اتحفظ."""
+    """HR → property_listings: event واحد denied، ومفيش أي كتابة في الداتابيز
+    (ولا محادثة جديدة ولا رسالة — الكتابة بعد ما الـretrieval ينجح بس)."""
+    conversations_before = conversation_ids(client, user_id)
     response = post_chat(client, {
         "message": PROPERTY_QUESTION, "role": "hr", "user_id": str(user_id),
         "category": "property_listings", "model": CHAT_MODEL,
@@ -154,9 +159,14 @@ def case_hr_property_listings_denied(client: TestClient, user_id: UUID) -> bool:
     print(f"  events: {events}")
     if [name for name, _ in events] != ["denied"]:
         return False
-    roles = [m["role"] for m in stored_messages(client, response.headers["x-conversation-id"], user_id)]
-    print(f"  الرسايل المتخزنة: {roles}")
-    return roles == ["user"]
+    # محادثة جديدة مكانتش موجودة: مفيش X-Conversation-Id لأن مفيش حاجة اتعملت.
+    print(f"  X-Conversation-Id موجود: {bool(response.headers.get('x-conversation-id'))}")
+    wrote_something = bool(
+        response.headers.get("x-conversation-id")
+        or conversation_ids(client, user_id) != conversations_before
+    )
+    print(f"  حصلت كتابة في الداتابيز: {wrote_something}")
+    return not wrote_something
 
 
 def case_paid_model_rejected_before_any_write(client: TestClient, user_id: UUID) -> bool:
