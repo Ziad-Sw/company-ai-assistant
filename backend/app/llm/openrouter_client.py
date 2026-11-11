@@ -21,6 +21,11 @@ _models_cache: tuple[float, list[dict]] | None = None
 # سقف لطول الرد: موديل مجاني داخل في loop مايفضلش ماسك الـconnection والـworker من غير نهاية.
 # عالي بما يكفي لموديلات الـreasoning (الـreasoning tokens بتتحسب من نفس الحد).
 _MAX_OUTPUT_TOKENS = 2048
+# رد الـcategory decision قصير (token واحد)، بس الـreasoning بتاع الموديلات
+# المجانية بيتحسب من نفس الحد — 512 كانت بتتنافس والـcontent بييجي فاضي مع
+# finish_reason=stop (اتقاست فعلياً على nemotron في اختبارات الـrouting)،
+# فالحد بقى بنفس سقف الرد العادي.
+_DECISION_MAX_TOKENS = 2048
 
 
 @lru_cache
@@ -96,3 +101,25 @@ async def stream_chat_completion(model: str, messages: list[dict]) -> AsyncGener
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+
+async def complete_chat(model: str, messages: list[dict]) -> str:
+    """
+    رد كامل من غير streaming — لنداءات الـagent القصيرة زي تحديد الـcategory
+    (الـwrapper التاني فوق streaming-only، وده مش بديل له).
+
+    فيه محاولة واحدة إضافية لو الرد فاضي: موديلات مجانية بترجع ساعات content
+    فاضي ومعاه reasoning كامل وfinish_reason=stop (مشكلة موثّقة من اختبارات
+    Phase 1) — إعادة المحاولة الواحدة بتقلل تذبذب قرار التوجيه من غير loop
+    مفتوح، وبعد كده الـcaller بيعمل fallback الآمن بتاعه.
+
+    Raises:
+        openai.APIError: أي فشل من OpenRouter (rate limit، موديل مش موجود، network).
+    """
+    for _ in range(2):
+        response = await _get_client().chat.completions.create(
+            model=model, messages=messages, max_tokens=_DECISION_MAX_TOKENS
+        )
+        if response.choices and response.choices[0].message.content:
+            return response.choices[0].message.content
+    return ""

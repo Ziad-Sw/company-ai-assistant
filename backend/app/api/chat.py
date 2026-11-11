@@ -1,18 +1,27 @@
 """
-POST /chat — سؤال الموظف → retrieval بالصلاحيات → إجابة من OpenRouter بـstreaming (SSE).
+POST /chat — سؤال الموظف → agent (LangGraph) → إجابة من OpenRouter بـstreaming (SSE).
+
+الفلو جوه الـgraph (PRD قسم 6): تحديد الـcategory بقرار LLM (agentic) → فحص
+صلاحية deterministic → retrieval بالصلاحيات → إجابة grounded. الـcategory
+بتيجي من الـagent مش من الـrequest — الـclient ملوش كلمة فيها خالص.
 
 بروتوكول الـSSE — الـdata في كل event عبارة عن JSON، عشان الـnewlines جوه النص
 ماتكسرش الـSSE framing:
     event: token   data: {"text": "..."}         مرة أو أكتر
     event: done    data: {"sources": [...]}      آخر event في أي رد اتحفظ
-    event: denied  data: {"message": "..."}      event واحد بس، من غير LLM
-    event: error   data: {"message": "..."}      الـretrieval أو OpenRouter فشل؛ الرد مش بيتحفظ
+    event: denied  data: {"message": "..."}      event واحد بس — رسالة الرفض نفسها
+    event: error   data: {"message": "..."}      فشل داخلي أو فشل الموديل
 
-الـdenied والـerror معناهم إن **مفيش أي كتابة حصلت** في conversations أو messages —
-المحادثة الجديدة بتتعمل ورسالة الموظف بتتحفظ بعد ما الـretrieval ينجح بس
-(مفيش orphan rows). الـconversation_id بيرجع في header ‏X-Conversation-Id
-(الـclient محتاجه لو المحادثة جديدة) — ومش موجود في الـdenied/error لمحادثة جديدة
-لأن مفيش حاجة اتعملت أصلاً.
+الكتابة في الداتابيز (invariant):
+- المحادثة الجديدة ورسالة الموظف بيتكتبوا **بعد ما مصير الطلب يتحسم** جوه
+  الـgraph (رفض / مش لاقي / فيه إجابة) — مافيش أي استثناء غير متوقع يسيب
+  محادثة ورسالة user من غير أي رد محفوظ.
+- الرفض دلوقتي **بيتحفظ** كرد assistant بنص رسالة الرفض اللي ظهرت للموظف
+  بالظبط (من غير الـcategory المقترحة ولا أي تفاصيل داخلية) — فمحادثة جديدة
+  على الرفض بترجّع X-Conversation-Id برضه.
+- الرد الجاهز "مش لاقي ده في بيانات الشركة" بيتحفظ برضه بـsources فاضية
+  (رد حقيقي بعد بحث حصل فعلاً)، والـretrieval/الـagent فشل استثناءً = مفيش
+  أي كتابة.
 """
 
 import json
@@ -24,27 +33,20 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from openai import APIError
 from pydantic import BaseModel, StringConstraints, field_validator
 from sqlalchemy.exc import IntegrityError
 
+from app.agent.graph import get_compiled_graph
+from app.agent.nodes import EMPTY_ANSWER_MESSAGE
 from app.api.models import fetch_free_models_or_502
 from app.db.conversation_store import add_message, create_conversation, find_conversation
-from app.llm.openrouter_client import stream_chat_completion
-from app.llm.prompts import NOT_FOUND_MESSAGE, build_grounded_system_prompt
-from app.rag.retrieval import (
-    ALL_CATEGORIES,
-    ROLE_ALLOWED_CATEGORIES,
-    PermissionDeniedError,
-    RetrievedChunk,
-    retrieve_chunks,
-)
+from app.llm.prompts import NOT_FOUND_MESSAGE
+from app.rag.retrieval import ROLE_ALLOWED_CATEGORIES, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-TOP_K = 5
 TITLE_MAX_CHARS = 50
 MESSAGE_MAX_CHARS = 4000
 RETRIEVAL_ERROR_MESSAGE = "حصل خطأ في البحث في بيانات الشركة — جرّب تاني."
@@ -59,24 +61,17 @@ class ChatRequest(BaseModel):
     # TEMPORARY: replace with JWT-derived role/user_id once auth is built
     user_id: UUID
     conversation_id: UUID | None = None
-    category: str | None = None
     model: Annotated[str, StringConstraints(min_length=1)]
 
-    # بنرفض role/category المش معروفين هنا (422) قبل ما نكتب أي حاجة في الداتابيز.
-    # "معروفة بس مش مسموحة" مش هنا — دي بتوصل لـretrieve_chunks وبترجع denied.
+    # بنرفض الـrole المش معروف هنا (422) قبل ما نكتب أي حاجة في الداتابيز.
+    # الـcategory مبقتش مدخل من الـclient أصلاً — بتتحدد جوه الـagent، والـallowlist
+    # بتاعتها في app/agent/nodes.py.
     @field_validator("role")
     @classmethod
     def _role_is_known(cls, role: str) -> str:
         if role not in ROLE_ALLOWED_CATEGORIES:
             raise ValueError(f"دور غير معروف: {role!r}")
         return role
-
-    @field_validator("category")
-    @classmethod
-    def _category_is_known(cls, category: str | None) -> str | None:
-        if category is not None and category not in ALL_CATEGORIES:
-            raise ValueError(f"category غير معروفة: {category!r}")
-        return category
 
 
 async def require_free_model(body: ChatRequest) -> ChatRequest:
@@ -94,78 +89,118 @@ async def require_free_model(body: ChatRequest) -> ChatRequest:
 
 
 @router.post("/chat")
-def chat(body: Annotated[ChatRequest, Depends(require_free_model)]) -> StreamingResponse:
-    """سؤال → retrieval بالصلاحيات → حفظ → رد streaming (راجع بروتوكول الـSSE فوق)."""
-    # قراية بس عشان الـ404 يرجع قبل ما نصرف embedding على request هيترفض عادي.
-    if body.conversation_id is not None and find_conversation(
-        body.conversation_id, body.user_id
-    ) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="المحادثة مش موجودة.")
+async def chat(body: Annotated[ChatRequest, Depends(require_free_model)]) -> StreamingResponse:
+    """سؤال → agent → حفظ → رد streaming (راجع بروتوكول الـSSE وinvariant الكتابة فوق)."""
+    await _require_owned_conversation(body)
+    stream = _start_agent_stream(body)
+    state = await _await_outcome(stream)
+    if state is None:
+        return _sse_response(body.conversation_id, [_sse_event("error", {"message": RETRIEVAL_ERROR_MESSAGE})])
 
-    try:
-        # TEMPORARY: naive retrieval, replace with LangGraph agent's category routing in the next phase
-        chunks = retrieve_chunks(
-            query=body.message, role=body.role, category=body.category, top_k=TOP_K
-        )
-    except PermissionDeniedError as exc:
-        return _sse_response(body.conversation_id, [_sse_event("denied", {"message": str(exc)})])
-    except Exception:
-        logger.exception("Retrieval failed (role=%s, category=%s)", body.role, body.category)
-        return _sse_response(
-            body.conversation_id, [_sse_event("error", {"message": RETRIEVAL_ERROR_MESSAGE})]
-        )
+    if state.get("permission_result") == "denied":
+        denial_message = state.get("denial_message") or ""
+        conversation_id = await _persist_turn(body, assistant_reply=denial_message)
+        return _sse_response(conversation_id, [_sse_event("denied", {"message": denial_message})])
 
-    # الـretrieval نجح — بعد كده بس المنشأة الجديدة ورسالة الموظف بيتكتبوا.
-    conversation_id = body.conversation_id or _create_conversation(body)
-    add_message(conversation_id, "user", body.message, sources=[])
-
-    if not chunks:
-        add_message(conversation_id, "assistant", NOT_FOUND_MESSAGE, sources=[])
+    if not state.get("retrieval_ok"):
+        conversation_id = await _persist_turn(body, assistant_reply=NOT_FOUND_MESSAGE)
         return _sse_response(
             conversation_id,
             [_sse_event("token", {"text": NOT_FOUND_MESSAGE}), _sse_event("done", {"sources": []})],
         )
 
-    return _sse_response(
-        conversation_id, _stream_grounded_answer(conversation_id, body, chunks)
+    conversation_id = await _persist_turn(body)
+    return _sse_response(conversation_id, _forward_answer(stream, conversation_id, state))
+
+
+async def _require_owned_conversation(body: ChatRequest) -> None:
+    # قراية بس عشان الـ404 يرجع قبل ما نصرف embedding أو LLM request على request هيترفض عادي.
+    if body.conversation_id is None:
+        return
+    found = await run_in_threadpool(find_conversation, body.conversation_id, body.user_id)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="المحادثة مش موجودة.")
+
+
+def _start_agent_stream(body: ChatRequest) -> AsyncGenerator:
+    return get_compiled_graph().astream(
+        {
+            "user_id": body.user_id,
+            "role": body.role,
+            "question": body.message,
+            "conversation_id": body.conversation_id,
+            "model": body.model,
+        },
+        stream_mode=["custom", "values"],
     )
 
 
-def _create_conversation(body: ChatRequest) -> UUID:
-    """محادثة جديدة بالـtitle = أول 50 حرف من السؤال."""
+async def _await_outcome(stream: AsyncGenerator) -> dict | None:
+    """
+    مرحلة الحسم: بتسحب الـstream لحد ما مصير الطلب يتحسم (denied / مش لاقي /
+    فيه إجابة). مافيش tokens جايين قبل كده — respond هو أول من يكتب على الـstream
+    وبييجي بعد الـretrieval، فمافيش حاجة بتضيع من التخطي ده. None = فشل داخلي.
+    """
+    state: dict = {}
     try:
-        return create_conversation(body.user_id, title=body.message[:TITLE_MAX_CHARS])
+        async for mode, chunk in stream:
+            if mode != "values":
+                continue
+            state = chunk
+            if chunk.get("retrieval_ok"):
+                break  # فيه إجابة جاية — باقي الـstream (tokens) للـresponse تحت
+    except Exception:
+        logger.exception("Agent failed before retrieval outcome (role=%s)", state.get("role"))
+        return None
+    return state
+
+
+async def _persist_turn(body: ChatRequest, assistant_reply: str | None = None) -> UUID:
+    """محادثة جديدة (بالـtitle = أول 50 حرف من السؤال) لو مفيش، + رسالة الموظف، + الرد الجاهز لو فيه."""
+    conversation_id = body.conversation_id or await _create_conversation(body)
+    await run_in_threadpool(add_message, conversation_id, "user", body.message, sources=[])
+    if assistant_reply is not None:
+        await run_in_threadpool(add_message, conversation_id, "assistant", assistant_reply, sources=[])
+    return conversation_id
+
+
+async def _create_conversation(body: ChatRequest) -> UUID:
+    try:
+        return await run_in_threadpool(create_conversation, body.user_id, body.message[:TITLE_MAX_CHARS])
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="الموظف ده مش موجود."
         ) from exc
 
 
-async def _stream_grounded_answer(
-    conversation_id: UUID, body: ChatRequest, chunks: list[RetrievedChunk]
+async def _forward_answer(
+    stream: AsyncGenerator, conversation_id: UUID, state: dict
 ) -> AsyncGenerator[str, None]:
-    """يعمل stream لرد الموديل، وبعد ما يخلص يحفظه بالمصادر اللي اتبعتتله."""
-    messages = [
-        {"role": "system", "content": build_grounded_system_prompt(chunks)},
-        {"role": "user", "content": body.message},
-    ]
+    """يكمل الـgraph stream: tokens من respond → SSE، وبعد ما يخلص يحفظ الرد بالمصادر."""
     answer_parts: list[str] = []
     try:
-        async for text in stream_chat_completion(body.model, messages):
-            answer_parts.append(text)
-            yield _sse_event("token", {"text": text})
-    except APIError as exc:
-        logger.warning("OpenRouter streaming failed (model=%s): %r", body.model, exc)
-        yield _sse_event("error", {"message": "الموديل مارجّعش رد — جرّب تاني أو اختار موديل تاني."})
+        async for mode, chunk in stream:
+            if mode != "custom":
+                continue
+            if chunk.get("type") == "token":
+                answer_parts.append(chunk["text"])
+                yield _sse_event("token", {"text": chunk["text"]})
+            elif chunk.get("type") == "error":
+                yield _sse_event("error", {"message": chunk["message"]})
+                return
+    except Exception:
+        logger.exception("Agent streaming failed (role=%s)", state.get("role"))
+        yield _sse_event("error", {"message": RETRIEVAL_ERROR_MESSAGE})
         return
 
     answer = "".join(answer_parts)
-    # موديلات الـreasoning المجانية ساعات بتخلص من غير ولا token في content.
+    # حماية زيادة: stream خلص من غير token ولا error (مش المفروض يحصل —
+    # respond بيكتب error event في الحالتين) — مايحفظش رد فاضي أصلاً.
     if not answer.strip():
-        yield _sse_event("error", {"message": "الموديل رجّع رد فاضي — جرّب تاني أو اختار موديل تاني."})
+        yield _sse_event("error", {"message": EMPTY_ANSWER_MESSAGE})
         return
 
-    sources = [_source_entry(chunk) for chunk in chunks]
+    sources = [_source_entry(chunk) for chunk in state.get("retrieved_chunks", [])]
     await run_in_threadpool(add_message, conversation_id, "assistant", answer, sources)
     yield _sse_event("done", {"sources": sources})
 

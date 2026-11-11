@@ -9,9 +9,10 @@
   - migrations/001_add_messages_sources.sql متطبّقة
   - موظف sales وموظف hr على الأقل في profiles (docs/demo-accounts.md)
 
-بيستهلك: 1 request من Gemini embedding، و1 chat request من الـ50 المجانية في اليوم
-بتاعة OpenRouter، وقائمة /models بتتجلب من OpenRouter مرة واحدة (بتتخزن in-memory
-بـ5 دقايق). المحادثات اللي بيعملها بتتمسح في الآخر.
+بيستهلك: 1 request من Gemini embedding لكل نداء /chat، ونداءات chat من الـ50
+المجانية في اليوم بتاعة OpenRouter (الرد المولّد = 2: تحديد الـcategory + الإجابة،
+والرفض = 1: تحديد الـcategory بس)، وقائمة /models بتتجلب من OpenRouter مرة واحدة
+(بتتخزن in-memory بـ5 دقايق). المحادثات اللي بيعملها بتتمسح في الآخر.
 الـexit code: 0 لو كله نجح، 1 لو أي حالة فشلت، 2 لو المتطلبات مش جاهزة.
 """
 
@@ -88,9 +89,10 @@ def post_chat(client: TestClient, body: dict) -> Response:
 
 
 def sales_payment_body(user_id: UUID) -> dict:
+    # مفيش category: بتتحدد جوه الـagent من السؤال (السؤال واضح إنه payment_policies).
     return {
         "message": PAYMENT_QUESTION, "role": "sales", "user_id": str(user_id),
-        "category": "payment_policies", "model": CHAT_MODEL,
+        "model": CHAT_MODEL,
     }
 
 
@@ -144,12 +146,13 @@ def case_sales_chat_streams_and_persists(client: TestClient, user_id: UUID) -> b
 
 
 def case_hr_property_listings_denied(client: TestClient, user_id: UUID) -> bool:
-    """HR → property_listings: event واحد denied، ومفيش أي كتابة في الداتابيز
-    (ولا محادثة جديدة ولا رسالة — الكتابة بعد ما الـretrieval ينجح بس)."""
-    conversations_before = conversation_ids(client, user_id)
+    """HR يسأل سؤال واضح إنه property_listings → الـagent يوجّهه هناك → فحص الصلاحية
+    بيرفض: event واحد denied، والرفض **بيتحفظ** كرد assistant بنص رسالة الرفض
+    بالظبط (بدون أي تفاصيل داخلية زي الـcategory المقترحة) — قرار معتمد في
+    Phase 2 (قبل كده الرفض مكانش بيتحفظ خالص)."""
     response = post_chat(client, {
         "message": PROPERTY_QUESTION, "role": "hr", "user_id": str(user_id),
-        "category": "property_listings", "model": CHAT_MODEL,
+        "model": CHAT_MODEL,
     })
     print(f"  status={response.status_code}")
     if response.status_code != 200:
@@ -159,14 +162,20 @@ def case_hr_property_listings_denied(client: TestClient, user_id: UUID) -> bool:
     print(f"  events: {events}")
     if [name for name, _ in events] != ["denied"]:
         return False
-    # محادثة جديدة مكانتش موجودة: مفيش X-Conversation-Id لأن مفيش حاجة اتعملت.
-    print(f"  X-Conversation-Id موجود: {bool(response.headers.get('x-conversation-id'))}")
-    wrote_something = bool(
-        response.headers.get("x-conversation-id")
-        or conversation_ids(client, user_id) != conversations_before
+    denial_message = events[0][1]["message"]
+    print(f"  رسالة الرفض: {denial_message}")
+    conversation_id = response.headers.get("x-conversation-id")
+    print(f"  X-Conversation-Id موجود: {bool(conversation_id)}")
+    if not conversation_id:
+        return False
+    messages = stored_messages(client, conversation_id, user_id)
+    print(f"  الرسايل المحفوظة: {[m['role'] for m in messages]}")
+    return (
+        [m["role"] for m in messages] == ["user", "assistant"]
+        and messages[1]["content"] == denial_message
+        and messages[1]["sources"] == []
+        and conversation_id in conversation_ids(client, user_id)
     )
-    print(f"  حصلت كتابة في الداتابيز: {wrote_something}")
-    return not wrote_something
 
 
 def case_paid_model_rejected_before_any_write(client: TestClient, user_id: UUID) -> bool:
@@ -193,7 +202,7 @@ def run_cases(client: TestClient, user_ids: dict[str, UUID]) -> int:
         ("GET /models (متوقع: فيه الموديل المجاني)", lambda: case_models_lists_chat_model(client)),
         ("sales → /chat payment_policies (متوقع: stream + حفظ)",
          lambda: case_sales_chat_streams_and_persists(client, user_ids["sales"])),
-        ("hr → /chat property_listings (متوقع: denied)",
+        ("hr → /chat (الـagent يوجّه سؤال الوحدات لـproperty_listings) (متوقع: denied + حفظ الرفض)",
          lambda: case_hr_property_listings_denied(client, user_ids["hr"])),
         ("sales → /chat بموديل مدفوع (متوقع: 422)",
          lambda: case_paid_model_rejected_before_any_write(client, user_ids["sales"])),
@@ -221,10 +230,14 @@ def main() -> None:
     # وعايزين رسالة المتطلبات اللي فوق تظهر الأول بدل traceback.
     from app.main import app
 
-    try:
-        failed = run_cases(TestClient(app), user_ids)
-    finally:
-        delete_created_conversations()
+    # with: portal واحد لكل الحالات (نفس الـevent loop) — الـAsyncOpenAI client
+    # الـcached بيعيد استخدام connections من نفس الـloop؛ من غير with كل request
+    # بياخد loop جديد، والاتصال من الـloop المقفول بيقع بـ"Event loop is closed".
+    with TestClient(app) as client:
+        try:
+            failed = run_cases(client, user_ids)
+        finally:
+            delete_created_conversations()
     sys.exit(1 if failed else 0)
 
 

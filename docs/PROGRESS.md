@@ -200,3 +200,85 @@
 - **بعد التشغيل الناجح:** blocker 3 هيتقفل، وساعتها `python -m scripts.test_chat_endpoint` (بعد `OPENROUTER_API_KEY` وmigration 001 اللي اتحلوا) يبقى قادر يعدي مسار الـstreaming + الحفظ end-to-end لأول مرة.
 
 **الحالة:** ⚠️ تم جزئياً — السكريبت كتب واتراجع (Code Security + Clean Code Guard) بس محتاج تشغيل فعلي للتأكيد: `python -m scripts.seed_demo_accounts` (من `backend/` والـvenv مفعّلة).
+
+---
+
+## 2026-11-10 — Phase 1: similarity threshold على الـtop-1 (0.60) + أول تشغيل end-to-end كامل للاختبار
+
+> متابعة لـentry "متابعات على هيكل الـbackend". القرار مبني على قياس فعلي بسكريبت `scripts/measure_similarity.py` (throwaway diagnostic — 11 سؤال على الداتابيز الحقيقية، مكتوب في مهمة استكشافية منفصلة من غير ما يتسجل فيها). بعد التشغيل، اتأكدنا إن الحسابات الـdemo اتبント (توسيط المهمة اللي فاتت) — فالاختبار الـend-to-end بقى ممكن لأول مرة.
+
+**القرار:** حد صلة ‏`RETRIEVAL_RELEVANCE_THRESHOLD = 0.60` بيتطبق على **الـtop-1 بس** (أعلى chunk في النتيجة، مش كل الـchunks الـ5). لو أعلى نتيجة أقل من 0.60، بيتعامل مع الطلب كأن الـretrieval رجّع فاضي: الرد الجاهز "مش لاقي ده في بيانات الشركة" بيتبعت مباشرة من غير LLM، وبيتحفظ بـ`sources=[]` — نفس سلوك حالة القائمة الفاضية بالظبط.
+
+**الـrationale (من القياس الفعلي):**
+- الأسئلة اللي ليها إجابة فعلية (on-topic، 4 أسئلة): أعلى نتيجة لكل سؤال بين **0.7074 و0.7870**.
+- الأسئلة اللي ملهاش أي علاقة (off-topic، 4 أسئلة): أعلى نتيجة بين **0.4713 و0.5113**.
+- الأسئلة الحدودية (borderline، 3 أسئلة): الإيجار **0.5557** والتمويل **0.5651** — مواضيع مش موجودة في البيانات أصلاً، والاتنين تحت 0.60 صح. العقارات التجارية **0.6275** — **هتعدي الـthreshold غلط، وده استثناء معلوم ومقبول**: ماينفعش نرفع الـthreshold لـ0.63 عشانه لأننا هنبطل أسئلة on-topic حقيقية (الحد الأدنى 0.707 قريب من حواف الـnoise). بيتقفل بـself-check بتاع الـagent في مرحلة LangGraph (Phase 2)، مش بالـthreshold.
+- **ليه top-1 بس:** في الأسئلة اللي ليها إجابة، الـranks 2–5 بينزلوا تحت 0.60 عادي (مثال: سؤال مارينا هايتس ‏0.787 → 0.624). threshold على كل الـchunks هيقطع context مفيد من نفس السؤال الصحيح.
+
+**تم:**
+- `RETRIEVAL_RELEVANCE_THRESHOLD = 0.60` كـconstant فوق `chat.py` بتعليق بيشرح أصل الرقم من القياس (مش تخمين) وبيشاور على `measure_similarity.py`، مع الاستثناء المعلوم (الأسئلة التجارية).
+- شرط الحالة الفاضية بقى: `not chunks or chunks[0].similarity_score < RETRIEVAL_RELEVANCE_THRESHOLD` — نفس الرد ونفس الحفظ في الحالتين (الموديل مابيشوفش أي context في الحالتين).
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/api/chat.py — الـconstant + شرط الـtop-1 المدمج مع حالة القائمة الفاضية
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- **أول تشغيل end-to-end كامل ناجح للاختبار اليدوي:** `python -m scripts.test_chat_endpoint` طلع **4/4 passed** (الـ3 blockers القدام اتقفلوا كلهم). أهم حاجة اتأكدت: مسار الـstreaming + الحفظ بقى شغال فعلاً — سؤال التقسيط رجّع 29 token والرد والمصادر اتحفظوا زي ما اتبعتوا بالظبط، والمصادر ضمت النسختين المتضاربتين (2025.1 و2026.1) زي ما متوقع.
+- **مسار تحت الـthreshold اتجرّب live:** سؤال الطقس (أعلى نتيجة قياسه ≈ 0.50) رجّع `token` واحد بالرد الجاهز + `done` ‏`sources=[]`، واتحفظ في الداتابيز (user + assistant بمصادر فاضية)، والموديل مااتطلبش منه حاجة — يعني الحاجة الوحيدة المستهلكة هي request الـembedding.
+- **سلوك الحفظ لسه زي ما كان:** الرد الجاهز بيتحفظ كرد assistant حقيقي (بعد بحث حصل فعلاً) بـ`sources=[]` — زي حالة القائمة الفاضية قبل كده بالظبط.
+- **Code Security:** الـthreshold server-side constant مش من الـclient — لو كان من الـrequest كان بيبقى vector للتلاعب (موظف يبعت threshold=0 يستقبل أي حاجة). التغيير بيقلل سطح الـprompt injection: محتوى غير ذي صلة مبقوش يوصل للموديل أصلاً. مفيش أي SQL جديد أو سطح إدخال جديد.
+- **Clean Code Guard:** الحالتين (فاضي / تحت الحد) في branch واحد لأنهم قاعدة واحدة — "مفيش context يقدر يجاوب"، مش تكرار نص. `chunks[0]` أعلى نتيجة بثقة في contract الـretrieval (`ORDER BY distance` موثق في retrieval.py). مفيش أي حاجة تتصلح — الـpass نضيف.
+- **ملاحظة تشغيلية:** الـthreshold مبني على 11 سؤال بس من توزيع حقيقي؛ هيتراجع في Phase 4 بـgolden dataset الـRAGAS (30-50 سؤال) — لو الحدود اتزحلقت، الرقم بيتعدل في مكان واحد.
+- **سكريبت القياس ماقسّش حاجة في الاختبار اليدوي:** سؤال التقسيط في الاختبار أعلى نتيجته 0.778 > 0.60 فمعدّي عادي؛ لو المحتوى اتغير وسال الاختبار نزل تحت الـthreshold، الحالة التانية هتفشل برسالة واضحة — دي النقطة اللي هتنبه إن الـthreshold محتاج مراجعة.
+- **الاختبارات اتشغلت بعد التغيير:** 4/4 + الـprobe بتاع تحت الـthreshold. الـexit codes والحذف في `finally` شغالين زي ما هما.
+
+**الحالة:** ✅ تم — الـthreshold متطبق واتجرّب في الاتجاهين (فوق/تحت)، والاختبار اليدوي عدّى end-to-end كامل (4/4) لأول مرة. الاستثناء المعلوم (الأسئلة التجارية 0.6275) متسجل كمهمة لـPhase 2 (self-check بتاع الـagent).
+
+---
+
+## 2026-11-11 — Phase 2a: الـagent بـLangGraph (توجيه الـcategory + فحص الصلاحية + memory)
+
+**تم:**
+- **Graph من 5 nodes** في `app/agent/`: `load_history → decide_category → check_permission → retrieve → respond` مع مخرجين شرطيين (denied بعد `check_permission`، not-found بعد `retrieve`) — الفلو الموثّق في PRD قسم 6 بالظبط. `respond` جوه الـgraph بيكتب tokens على الـstream writer بتاع LangGraph (`{"type": "token"|"error", ...}`) و`/chat` بيحوّلها لـSSE حرفياً — بروتوكول الـevents (token/done/denied/error) زي ما هو بالظبط.
+- **`check_permission` كود ثابت (deterministic) مش LLM**: بتقرا من الـstate **بس** `role` و`decided_category` (مفيش سؤال ولا history ولا أي نص مولّد)، ومتكلفة عن `resolve_categories()` في retrieval.py من غير تكرار. الفرق الحرج متطبق ومُختبَر أوفلاين: category معروفة مش مسموحة = رفض حقيقي برسالة PRD نقطة 5؛ category **مختلقة** = مش رفض — fallback لـNone (scope الـrole كامل) والسؤال بيكمّل عادي.
+- **`decide_category` بـprompt-then-parse + allowlist صارم**: برومبت بيوصف الـ3 categories ويردّ token واحد، والـparse بيقبّل الرد ضد أسماء الـ3 بس. أي parse فاشل أو output مش معروف أو فشل نداء (`APIError`) = `decided_category=None` — ممنوع نمنع الموظف لأن نداء التوجيه باظ (قرار معتمد؛ الفشل الآمن دايماً = بحث في scope الـrole).
+- **`retrieve` بنفس `retrieve_chunks()` من غير تعديل** — والـre-check الداخلي بتاعها فضل طبقة حماية تانية (defense in depth). حد الصلة 0.60 (top-1) اتنقل من chat.py **حرفياً** للـnode بنفس الـcomment والقياس.
+- **Memory**: `load_history` بتقرا آخر 10 رسايل من جدول `messages` عن طريق `conversation_store.list_messages()` — من غير checkpointer، الجدول هو مصدر الحقيقة. الـhistory بتغذّي برومبت التوجيه (لحل references زي "والتاني؟") وبرومبت الإجابة. اتراجعت مباشرة على الداتابيز الحقيقية: 12 رسالة → آخر 10 بالترتيب، ومحادثة مش موجودة → فاضية من غير ما نقع.
+- **`/chat` بقى بيشتغل بالـgraph**: الـendpoint بقى `async`، بيسحب الـstream لحد ما "مصير الطلب يتحسم" (denied/مش لاقي/فيه إجابة)، وساعتها بس بيحفظ، وبعدين بيكمل الـstream للـSSE. كده `X-Conversation-Id` بيرجع صح حتى للمحادثة الجديدة (بتتعمل قبل ما الـresponse يبعت). **الـ`category` اتحذفت من الـrequest خالص** — الحقل والـvalidator وأي client ملوش كلمة في التوجيه.
+- `complete_chat()` — نداء non-streaming صغير في openrouter_client.py لنداء التوجيه.
+
+**⚠️ قرار معتمد مُنفَّذ — تغيير invariant حفظ الرفض (مش مدفون في الكلام):**
+- **الرفض دلوقتي بيتحفظ في الداتابيز**: رسالة الـuser + رد assistant بنص رسالة الرفض اللي ظهرت للموظف **بالظبط** (من غير الـcategory المقترحة ولا الـrole ولا أي تفاصيل داخلية)، بـ`sources=[]`. المحادثة الجديدة على الرفض بترجّع `X-Conversation-Id` (قبل كده الرفض مكانش بيكتب أي حاجة ومفيش header) — **السلوك اتغيّر عمداً** حسب القرار المعتمد، والاختبار اتحدّث (بدل "مفيش كتابة" بقى assertion على الحفظ بالنص الحرفي).
+- invariant "مفيش orphan rows" لسه شغال: المحادثة ورسالة الـuser بيتكتبوا **بعد ما مصير الطلب يتحسم جوه الـgraph** (رفض / مش لاقي / فيه إجابة) — أي استثناء غير متوقع (داتابيز/embedding) مافيش أي كتابة، زي ما كان.
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/agent/\_\_init\_\_.py — فاضي (package marker)
+- backend/app/agent/state.py — `AgentState` TypedDict (total=False) بالحقول المعتمدة: user_id, role, question, conversation_id, model, history, decided_category, permission_result, denial_message, retrieved_chunks, retrieval_ok
+- backend/app/agent/nodes.py — الـ5 nodes + `parse_decided_category` + حافتي التوجيه + ثوابت الـthreshold وTOP_K ورسايل error الموديل (اللي كانت في chat.py، منقولين حرفياً)
+- backend/app/agent/prompts.py — برومبت تحديد الـcategory بس (برومبت الإجابة فضل في llm/prompts.py زي ما هو، ماتلمسش)
+- backend/app/agent/graph.py — `build_graph()` + `get_compiled_graph()` (lru_cache، مرة واحدة لكل عملية)
+- backend/app/api/chat.py — إعادة كتابة: حذف `category` + الـvalidator + كومنتات TEMPORARY بتاعتها؛ الـgraph بديل نداء `retrieve_chunks` المباشر؛ كل الكتابة (محادثة/رسايل/رفض) في chat.py بعد حسم المصير؛ `_stream_grounded_answer` اتنقلت منطقياً لـnode الـrespond
+- backend/app/llm/openrouter_client.py — `complete_chat()` non-streaming + محاولة واحدة إضافية على الرد الفاضي (شوف الانحرافات)
+- backend/scripts/test_chat_endpoint.py — حذف `category` من الـpayloads، حالة الرفض اتجدّدت للحفظ الجديد، `with TestClient(...)` واحد لكل التشغيلة (شوف الانحرافات)
+- backend/scripts/test_agent_routing.py — سكريبت جديد بـ9 حالات (فوق) بيطبع تكلفة كل حالة وبيقعد مفهوم لو الـquota خلص في النص
+
+**قرارات تنفيذية اتاخدت (انحرافات معلنة عن الـprompt):**
+1. **الكتابة كلها في chat.py مش في الـnodes** (قرار هيكلي): المحادثة الجديدة بتتعمل **بعد** ما الـgraph يحسم المصير — يعني بعد ما الـgraph ابدأ تشغيله، والـid الجديد مش موجود في الـstate بتاع الـgraph الأصلاً. فبدل ما node الـrespond يكتب رد الـassistant بمحادثة مالهاش id، كل الكتابة بقت في طبقة الـAPI بنفس نقاط الضبط المطلوبة (point 6): بعد حسم المصير، قبل الـstreaming، والرفض/الرد الجاهز بيتحفظوا قبل ما الـresponse يبعت. النتيجة: الـnodes مالهاش أي كتابة DB (أسهل اختبار)، والـinvariants متحفظة بالظبط.
+2. **`_DECISION_MAX_TOKENS` بقى 2048 + retry واحد على الرد الفاضي** في `complete_chat()`: nemotron بيرجع ساعات content فاضي (reasoning كامل + finish_reason=stop) في النداء الـnon-streaming، واتقاست فعلياً — بـ512 الـreasoning بياكل الميزانية والـcontent مش بييجي خالص، فقرار التوجيه كان بيقع fallback لـNone بالغلط. المحاولة الإضافية الواحدة (مش loop مفتوح) بتقلل التذبذب، وبعد كده الـfallback الآمن شغال.
+3. **`with TestClient(app) as client`** في السكريبتين: من غير `with` كل request بياخد event loop جديد، والـAsyncOpenAI client الـcached بيعيد استخدام connections من الـloop المقفول → `RuntimeError: Event loop is closed` في تاني نداء LLM. المشكلة test-harness بس (uvicorn loop واحد في الإنتاج) — ظهرت أول مرة لأن التوجيه دلوقتي بيعمل نداء LLM في **كل** /chat.
+4. **assertion الـmemory اترخّات للـflow contract**: الدور التاني لازم يجاوب من غير error بمصادر مش فاضية من الـcategories المسموحة، والدورين في نفس المحادثة (4 رسايل). **دقة توجيه سؤال الضمير نفسها** (هل sources كلها listings؟) دي جودة موديل — بيتقاس في golden dataset بتاع RAGAS (Phase 4) مش في اختبار endpoint، زي قاعدة "مافيش assertion على صياغة/جودة رد الموديل" الموثّقة من Phase 1.
+5. الـendpoint بقى `async def` (كان `def`): لازم عشان استهلاك الـstream المزدوج (حسم المصير → رجّع response → كمّل الـstream)، وده اللي بيخلي الـheader صح للمحادثة الجديدة.
+
+**Guard passes:**
+- **Code Security:** مفيش SQL جديد ولا سطح إدخال جديد (الـcategory انحذفت من الـrequest — السطح نقص مش زاد). رد الموديل على التوجيه بيترفض ضد allowlist قبل ما يلمس retrieval (الـinjection في التوجيه أقصى ضرره fallback لـNone = بحث داخل scope المسموح). رسالة الرفض المحفوظة نص بتاعنا deterministic مش نص موديل. الـmodel id متفحص ضد قائمة المجانية قبل أي نداء. مافيش أسرار في الـlogs. الـcontext اللي بيشوفه الموديل متفلتر بالصلاحية قبل كده (زي ما كان).
+- **Clean Code Guard:** مافيش imports مش مستخدمة (AST pass). اللي اتصلح أثناء الـpass: `chat()` نزلت من ~45 لـ~15 سطر بتقسيم `_require_owned_conversation` / `_start_agent_stream` / `_await_outcome`؛ parameter بتاع اللغة في حالة الاختبار (boolean flag بالمعنى) اتبدّل بحالتين صريحتين فوق helper واحد؛ return type كاذب في `build_graph` اتشال؛ BOM تسل من تعديل PowerShell في سكريبت الاختبار اتشال. المتعلّم عليه: `retrieve` بيرجّع الـchunks كاملة حتى لما تحت الحد (اتخزنت في الـstate للمراجعة/الـaudit بس — الحالة بتتحكم في الرد).
+- **Test Guard:** مافيش mocks — داتابيز وOpenRouter حقيقيين، وassertions على الـsaved state (sources/categories/رسايل) مش على الصياغة (Rules 1/10/12). كل حالة بتمسك bug مختلف. الفحوصات الـdeterministic أوفلاين (case 0، تكلفة 0) بتقفل فروع `check_permission` الثلاثة والـparse من غير LLM.
+
+**اللي اتجرّب فعلاً (قبل ما الـquota يخلص) والحالة لكل حاجة:**
+- `python -m scripts.test_chat_endpoint` → **4/4 passed**: `/models`، sales سؤال التقسيط → 31 token + حفظ الرد والمصادر (النسختين 2025.1/2026.1) **عبر الـgraph كامل** (توجيه → صلاحية → retrieval → إجابة)، hr سؤال الوحدات → `denied` + حفظ الرفض بالنص الحرفي + header، موديل مدفوع → 422.
+- من `test_agent_routing` (تشغيلة كاملة 5/9 بسبب الـquota، وبعدها rerun للحالات الفاشلة): التوجيه اتأكد منه فعلياً في **property_listings (إنجليزي)، company_info_support (إنجليزي)، payment_policies (عربي)، property_listings (عربي)** — المصادر المحفوظة من الـcategory المتوقعة بالظبط. sales سؤال عام → مصادر من الـ3 categories (scope كامل). not-found → الرد الجاهز بالنص + `sources=[]` + محفوظ. regression 422s + framing. الفحوصات الأوفلاين 1/1.
+- `load_history` اتراجعت مباشرة على الداتابيز (من غير LLM ولا quota): آخر 10 من 12 بالترتيب، ومحادثة غير موجودة/None → فاضية.
+- **متبقي يتأكد لما الـquota يرجع (50/يوم خلاصوا في اليوم ده):** payment_policies بالإنجليزي (محاولة واحدة فشلت برد nemotron فاضي قبل إصلاح ميزانية الـdecision)، company_info_support بالعربي، hr + السؤال العام → company_info_support بس، وmemory end-to-end بالعقد المرن. التشغيلة الكاملة: `python -m scripts.test_agent_routing`.
+- **ملاحظة على الموديل المثبّت:** nemotron لسه بيرجع ساعات content فاضي حتى في الـstreaming (خداع Phase 1 المعروف) — بيطلع `error` event ومافيش حفظ (نفس عقد Phase 1). لو تكرر في rerun، التبديل سطر واحد في `CHAT_MODEL` بالسكريبتين (الموديل ده للـاختبار بس، والـdropdown مش متأثر).
+
+**الحالة:** ⚠️ تم جزئياً — الكود كله مكتوب والبنية والفحوصات الـdeterministic + 8 حالات live اتأكدوا (4/4 كاملة في test_chat_endpoint + التوجيه في الاتجاهين بتأكيد جزئي + memory node مباشرة). الباقي محتاج rerun بعد رجوع الـquota اليومي بس، ومفيش أي تغيير كود متوقع له.
