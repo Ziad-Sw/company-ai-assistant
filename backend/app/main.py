@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat, conversations, models
+from app.api import chat, conversations, me, models
 from app.core.config import get_settings
 
 # session.py وsupabase_client.py وembeddings.py بيقروا الـkeys من os.environ
@@ -27,11 +27,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_DEV_ORIGIN],
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
     # من غيرها الـbrowser مش هيسمح للـfrontend يقرا الـconversation_id بتاع المحادثة الجديدة.
     expose_headers=["X-Conversation-Id"],
 )
 
 app.include_router(chat.router)
 app.include_router(conversations.router)
+app.include_router(me.router)
 app.include_router(models.router)

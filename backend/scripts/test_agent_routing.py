@@ -3,12 +3,14 @@
 
 طريقة التشغيل (من فولدر backend/، والـvenv مفعّلة):
     python -m scripts.test_agent_routing
+    python -m scripts.test_agent_routing --only memory,hr_broad   (subset معين — للـreruns المقيدة بالـquota؛ بدون flag بيشتغل الكل)
 
 بيغطي: التوجيه الصح لكل category (إنجليزي + عربي)، الرفض عبر الـgraph كامل
 ووحفظه كرسالة assistant، السؤال العام (decided_category=None → scope الـrole
 كامل)، الـmemory على محادثتين في نفس conversation_id، مسار "مش لاقي"،
-والـregression (SSE framing / موديل مدفوع / دور غير معروف). كمان فحوصات
-deterministic أوفلاين (parse الـcategory وcheck_permission) من غير أي quota.
+والـregressions (SSE framing / موديل مدفوع / نداء من غير Authorization → 401).
+كمان فحوصات deterministic أوفلاين (parse الـcategory وcheck_permission) من
+غير أي quota.
 
 بيستهلك تقريباً: 21 chat request من الـ50 المجانية في اليوم بتاعة OpenRouter
 (كل رد مولّد = 2: تحديد الـcategory + الإجابة؛ الرفض و"مش لاقي" = 1 بس؛
@@ -23,7 +25,6 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
@@ -35,6 +36,7 @@ from app.agent.nodes import check_permission, parse_decided_category
 from app.core.config import get_settings
 from app.db.session import get_session_factory
 from app.llm.prompts import NOT_FOUND_MESSAGE
+from scripts.demo_auth import login_all
 
 # موديل محدد ومسمّى للنتايج الـdeterministic — ده للـاختبار بس، وGET /models
 # والـdropdown بتاع المستخدمين فاضلين بيجيبوا كل الموديلات المجانية زي ما هما.
@@ -61,13 +63,6 @@ NOT_FOUND_QUESTION = "What's the weather like today in Cairo?"
 created_conversation_ids: list[str] = []
 
 
-def find_user_id(role: str) -> UUID | None:
-    with get_session_factory().begin() as session:
-        return session.execute(
-            text("SELECT id FROM public.profiles WHERE role = :role LIMIT 1"), {"role": role}
-        ).scalar_one_or_none()
-
-
 def has_sources_column() -> bool:
     with get_session_factory().begin() as session:
         return session.execute(
@@ -82,18 +77,16 @@ def env_is_set(name: str) -> bool:
     return bool(os.environ.get(name))
 
 
-def missing_preconditions(user_ids: dict[str, UUID | None]) -> list[str]:
-    problems = [
-        f"مفيش موظف role={role} في profiles — اعمل seed للـdemo accounts (docs/demo-accounts.md)"
-        for role, user_id in user_ids.items()
-        if user_id is None
-    ]
+def missing_preconditions() -> list[str]:
+    problems = []
     if not has_sources_column():
         problems.append("عمود messages.sources مش موجود — طبّق migrations/001_add_messages_sources.sql")
     for name, label in [
         ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
         ("GEMINI_API_KEY", "GEMINI_API_KEY (embeddings)"),
         ("DATABASE_URL", "DATABASE_URL"),
+        ("SUPABASE_URL", "SUPABASE_URL (تسجيل دخول الـdemo accounts)"),
+        ("SUPABASE_ANON_KEY", "SUPABASE_ANON_KEY (تسجيل دخول الـdemo accounts)"),
     ]:
         if not env_is_set(name):
             problems.append(f"{label} فاضي أو مش موجود في backend/.env")
@@ -113,28 +106,30 @@ def parse_sse(body: str) -> list[tuple[str, dict]]:
     return events
 
 
-def post_chat(client: TestClient, body: dict) -> Response:
-    response = client.post("/chat", json=body)
+def post_chat(client: TestClient, token: str, body: dict) -> Response:
+    response = client.post("/chat", json=body, headers={"Authorization": f"Bearer {token}"})
     if conversation_id := response.headers.get("x-conversation-id"):
         created_conversation_ids.append(conversation_id)
     return response
 
 
-def chat_body(user_id: UUID, message: str, role: str = "sales", model: str = CHAT_MODEL) -> dict:
-    return {"message": message, "role": role, "user_id": str(user_id), "model": model}
+def chat_body(message: str, model: str = CHAT_MODEL) -> dict:
+    # مفيش role ولا user_id في الـbody: بيتقروا من الـJWT على السيرفر
+    # (app/auth/dependencies.py) — الدور بيتحدد بحساب الـdemo اللي اتعمل بيه login.
+    return {"message": message, "model": model}
 
 
-def stored_messages(client: TestClient, conversation_id: str, user_id: UUID) -> list[dict]:
-    response = client.get(f"/conversations/{conversation_id}", params={"user_id": str(user_id)})
+def stored_messages(client: TestClient, conversation_id: str, token: str) -> list[dict]:
+    response = client.get(f"/conversations/{conversation_id}", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
     return response.json()["messages"]
 
 
-def source_categories(client: TestClient, conversation_id: str, user_id: UUID) -> list[str]:
+def source_categories(client: TestClient, conversation_id: str, token: str) -> list[str]:
     """categories المستندات اللي المصادر المحفوظة بتشاور عليها — من chunk_id → documents."""
     chunk_ids = [
         source["chunk_id"]
-        for message in stored_messages(client, conversation_id, user_id)
+        for message in stored_messages(client, conversation_id, token)
         if message["role"] == "assistant"
         for source in message["sources"]
     ]
@@ -188,9 +183,9 @@ def case_offline_deterministic_contracts() -> bool:
     return all(checks)
 
 
-def _assert_routes_to_expected(client: TestClient, user_id: UUID, question: str, expected_category: str) -> bool:
+def _assert_routes_to_expected(client: TestClient, token: str, question: str, expected_category: str) -> bool:
     """سؤال واحد واضح → مصادر المحادثة كلها من الـcategory المتوقعة (على saved sources)."""
-    response = post_chat(client, chat_body(user_id, question))
+    response = post_chat(client, token, chat_body(question))
     print(f"  [{expected_category}] status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -199,31 +194,31 @@ def _assert_routes_to_expected(client: TestClient, user_id: UUID, question: str,
     if events[-1][0] != "done":
         print(f"  آخر event مش done: {events_summary(events)}")
         return False
-    categories = source_categories(client, response.headers["x-conversation-id"], user_id)
+    categories = source_categories(client, response.headers["x-conversation-id"], token)
     print(f"  categories المصادر: {categories}")
     return categories == [expected_category]
 
 
-def case_routes_each_category_in_english(client: TestClient, user_id: UUID) -> bool:
+def case_routes_each_category_in_english(client: TestClient, token: str) -> bool:
     """لكل category سؤال إنجليزي واضح → التوجيه الصح."""
     return all(
-        _assert_routes_to_expected(client, user_id, english, expected_category)
+        _assert_routes_to_expected(client, token, english, expected_category)
         for expected_category, english, _ in ROUTING_CASES
     )
 
 
-def case_routes_each_category_in_arabic(client: TestClient, user_id: UUID) -> bool:
+def case_routes_each_category_in_arabic(client: TestClient, token: str) -> bool:
     """لكل category سؤال عربي واضح → التوجيه الصح (دعم اللغتين)."""
     return all(
-        _assert_routes_to_expected(client, user_id, arabic, expected_category)
+        _assert_routes_to_expected(client, token, arabic, expected_category)
         for expected_category, _, arabic in ROUTING_CASES
     )
 
 
-def case_hr_denial_saved(client: TestClient, user_id: UUID) -> bool:
+def case_hr_denial_saved(client: TestClient, token: str) -> bool:
     """HR + سؤال واضح إنه property_listings → denied، والرفض محفوظ كرسالة assistant
     بنص رسالة الرفض اللي ظهرت بالظبط ومصادرها فاضية (قرار معتمد في Phase 2)."""
-    response = post_chat(client, chat_body(user_id, ROUTING_CASES[0][1], role="hr"))
+    response = post_chat(client, token, chat_body(ROUTING_CASES[0][1]))
     print(f"  status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -234,7 +229,7 @@ def case_hr_denial_saved(client: TestClient, user_id: UUID) -> bool:
         return False
     denial_message = events[0][1]["message"]
     print(f"  رسالة الرفض: {denial_message}")
-    messages = stored_messages(client, response.headers["x-conversation-id"], user_id)
+    messages = stored_messages(client, response.headers["x-conversation-id"], token)
     print(f"  الرسايل المحفوظة: {[m['role'] for m in messages]}")
     return (
         [m["role"] for m in messages] == ["user", "assistant"]
@@ -243,11 +238,11 @@ def case_hr_denial_saved(client: TestClient, user_id: UUID) -> bool:
     )
 
 
-def case_sales_broad_spans_allowed_scope(client: TestClient, user_id: UUID) -> bool:
+def case_sales_broad_spans_allowed_scope(client: TestClient, token: str) -> bool:
     """سؤال عام متعدد المواضيع (sales) → scope كامل: مصادر من أكتر من category
     مسموحة. لو الـagent وَجّه لـcategory واحدة بثقة، الحالة تفشل بالتصميم —
     ده اختبار مسار None/الفشل-الآمن مش اختبار routing."""
-    response = post_chat(client, chat_body(user_id, BROAD_QUESTION))
+    response = post_chat(client, token, chat_body(BROAD_QUESTION))
     print(f"  status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -256,15 +251,15 @@ def case_sales_broad_spans_allowed_scope(client: TestClient, user_id: UUID) -> b
     if events[-1][0] != "done":
         print(f"  آخر event مش done: {events_summary(events)}")
         return False
-    categories = source_categories(client, response.headers["x-conversation-id"], user_id)
+    categories = source_categories(client, response.headers["x-conversation-id"], token)
     print(f"  categories المصادر: {categories} (المسموح لـsales: الثلاثة كلهم)")
     return len(categories) >= 2
 
 
-def case_hr_broad_scoped_to_support_only(client: TestClient, user_id: UUID) -> bool:
+def case_hr_broad_scoped_to_support_only(client: TestClient, token: str) -> bool:
     """نفس السؤال العام مع hr → مصادر من company_info_support بس. الرفض هنا
     (routing لـcategory ممنوعة بدل none) بيفشل الحالة برسالة واضحة."""
-    response = post_chat(client, chat_body(user_id, BROAD_QUESTION, role="hr"))
+    response = post_chat(client, token, chat_body(BROAD_QUESTION))
     print(f"  status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -273,19 +268,19 @@ def case_hr_broad_scoped_to_support_only(client: TestClient, user_id: UUID) -> b
     if events[-1][0] != "done":
         print(f"  المتوقع done ومصادر من company_info_support، طلع: {events_summary(events)}")
         return False
-    categories = source_categories(client, response.headers["x-conversation-id"], user_id)
+    categories = source_categories(client, response.headers["x-conversation-id"], token)
     print(f"  categories المصادر: {categories} (المسموح لـhr: company_info_support بس)")
     return categories == ["company_info_support"]
 
 
-def case_memory_two_turns(client: TestClient, user_id: UUID) -> bool:
+def case_memory_two_turns(client: TestClient, token: str) -> bool:
     """دورين في نفس المحادثة: السؤال التاني بـreference ("الأرخص واحدة؟") من غير
     ما يعيد اسم الـcompound. العقد المتحقق منه هنا: الدور التاني بيجاوب من غير
     error وبمصادر مش فاضية من الـcategories المسموحة لـsales، والدورين اتحفظوا
     في نفس المحادثة (4 رسايل). **دقة توجيه سؤال الضمير نفسها** (هل sources كلها
     listings؟) دي جودة موديل — بيتقاس في golden dataset بتاع RAGAS في Phase 4،
     مش في اختبار endpoint (نفس مبدأ مافيش assertion على صياغة الرد)."""
-    first = post_chat(client, chat_body(user_id, MEMORY_TURN_1))
+    first = post_chat(client, token, chat_body(MEMORY_TURN_1))
     print(f"  الدور الأول: status={first.status_code}")
     if first.status_code != 200:
         return False
@@ -294,7 +289,7 @@ def case_memory_two_turns(client: TestClient, user_id: UUID) -> bool:
         print(f"  الدور الأول ماخدش done: {events_summary(events)}")
         return False
     conversation_id = first.headers["x-conversation-id"]
-    second = post_chat(client, {**chat_body(user_id, MEMORY_TURN_2), "conversation_id": conversation_id})
+    second = post_chat(client, token, {**chat_body(MEMORY_TURN_2), "conversation_id": conversation_id})
     print(f"  الدور التاني: status={second.status_code}")
     if second.status_code != 200:
         print(f"  {second.text}")
@@ -303,8 +298,8 @@ def case_memory_two_turns(client: TestClient, user_id: UUID) -> bool:
     if events[-1][0] != "done":
         print(f"  الدور التاني ماخدش done: {events_summary(events)}")
         return False
-    categories = source_categories(client, conversation_id, user_id)
-    messages = stored_messages(client, conversation_id, user_id)
+    categories = source_categories(client, conversation_id, token)
+    messages = stored_messages(client, conversation_id, token)
     print(f"  categories مصادر الدورين: {categories} (المسموح لـsales: الثلاثة كلهم) | الرسايل: {[m['role'] for m in messages]}")
     return (
         bool(categories)
@@ -313,9 +308,9 @@ def case_memory_two_turns(client: TestClient, user_id: UUID) -> bool:
     )
 
 
-def case_not_found_canned_and_saved(client: TestClient, user_id: UUID) -> bool:
+def case_not_found_canned_and_saved(client: TestClient, token: str) -> bool:
     """سؤال ملوش علاقة بالبيانات → الرد الجاهز بالنص، sources=[]، ومحفوظ كرد assistant."""
-    response = post_chat(client, chat_body(user_id, NOT_FOUND_QUESTION))
+    response = post_chat(client, token, chat_body(NOT_FOUND_QUESTION))
     print(f"  status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -326,7 +321,7 @@ def case_not_found_canned_and_saved(client: TestClient, user_id: UUID) -> bool:
     print(f"  events: {len(tokens)} token + {[name for name, _ in events if name != 'token']}")
     if [name for name, _ in events] != ["token", "done"]:
         return False
-    messages = stored_messages(client, response.headers["x-conversation-id"], user_id)
+    messages = stored_messages(client, response.headers["x-conversation-id"], token)
     print(f"  الرسايل المحفوظة: {[m['role'] for m in messages]}")
     return (
         answer == NOT_FOUND_MESSAGE
@@ -337,15 +332,21 @@ def case_not_found_canned_and_saved(client: TestClient, user_id: UUID) -> bool:
     )
 
 
-def case_regressions_no_llm_cost(client: TestClient, user_id: UUID) -> bool:
-    """موديل مدفوع → 422، ودور غير معروف → 422 — قبل أي كتابة (مفيش تكلفة LLM)."""
-    before = client.get("/conversations", params={"user_id": str(user_id)}).json()
-    paid = client.post("/chat", json={**chat_body(user_id, BROAD_QUESTION), "model": PAID_MODEL})
-    unknown = client.post("/chat", json=chat_body(user_id, BROAD_QUESTION, role="guest"))
-    after = client.get("/conversations", params={"user_id": str(user_id)}).json()
-    print(f"  موديل مدفوع: {paid.status_code} (متوقع 422) | دور غير معروف: {unknown.status_code} (متوقع 422)")
+def case_regressions_no_llm_cost(client: TestClient, token: str) -> bool:
+    """موديل مدفوع → 422، ونداء /chat من غير Authorization → 401 — قبل أي كتابة
+    (مفيش تكلفة LLM). (فحص "دور غير معروف → 422" اتشال: الـrole بقى بيتقرا من
+    الـJWT على السيرفر ومش حقول request خالص.)"""
+    before = client.get("/conversations", headers={"Authorization": f"Bearer {token}"}).json()
+    paid = client.post("/chat", json={**chat_body(BROAD_QUESTION), "model": PAID_MODEL},
+                       headers={"Authorization": f"Bearer {token}"})
+    unauthenticated = client.post("/chat", json=chat_body(BROAD_QUESTION))
+    after = client.get("/conversations", headers={"Authorization": f"Bearer {token}"}).json()
+    print(
+        f"  موديل مدفوع: {paid.status_code} (متوقع 422) | بدون Authorization: "
+        f"{unauthenticated.status_code} (متوقع 401)"
+    )
     print(f"  عدد المحادثات قبل/بعد: {len(before)}/{len(after)}")
-    return paid.status_code == 422 and unknown.status_code == 422 and before == after
+    return paid.status_code == 422 and unauthenticated.status_code == 401 and before == after
 
 
 def delete_created_conversations() -> None:
@@ -357,27 +358,34 @@ def delete_created_conversations() -> None:
             )
 
 
-def run_cases(client: TestClient, user_ids: dict[str, UUID]) -> int:
-    """(العنوان، الحالة، تكلفة LLM التقديرية) — بالترتيب، والفشل مابيقفلش اللي بعده."""
-    cases: list[tuple[str, Callable[[], bool], int]] = [
-        ("فحوصات deterministic أوفلاين (تكلفة: 0)", case_offline_deterministic_contracts, 0),
-        ("توجيه كل category — إنجليزي (تكلفة: 6 LLM)", lambda: case_routes_each_category_in_english(client, user_ids["sales"]), 6),
-        ("توجيه كل category — عربي (تكلفة: 6 LLM)", lambda: case_routes_each_category_in_arabic(client, user_ids["sales"]), 6),
-        ("hr → سؤال property_listings (متوقع: denied + حفظ الرفض) (تكلفة: 1 LLM)",
-         lambda: case_hr_denial_saved(client, user_ids["hr"]), 1),
-        ("sales → سؤال عام متعدد المواضيع (متوقع: أكتر من category مسموحة) (تكلفة: 2 LLM)",
-         lambda: case_sales_broad_spans_allowed_scope(client, user_ids["sales"]), 2),
-        ("hr → نفس السؤال العام (متوقع: company_info_support بس) (تكلفة: 1 LLM)",
-         lambda: case_hr_broad_scoped_to_support_only(client, user_ids["hr"]), 1),
-        ("memory — دورين في نفس المحادثة (تكلفة: 4 LLM)", lambda: case_memory_two_turns(client, user_ids["sales"]), 4),
-        ("سؤال ملوش علاقة (متوقع: الرد الجاهز + حفظه) (تكلفة: 1 LLM)",
-         lambda: case_not_found_canned_and_saved(client, user_ids["sales"]), 1),
-        ("regression — موديل مدفوع ودور غير معروف (تكلفة: 0)",
-         lambda: case_regressions_no_llm_cost(client, user_ids["sales"]), 0),
+def run_cases(client: TestClient, tokens: dict[str, str], only: set[str] | None = None) -> int:
+    """(الاسم، العنوان، الحالة، تكلفة LLM التقديرية) — بالترتيب، والفشل مابيقفلش اللي بعده.
+    only: أسماء حالات محددة (مفصولة بفواصل عبر --only) لتشغيل subset — useful لو الـquota محدود."""
+    cases: list[tuple[str, str, Callable[[], bool], int]] = [
+        ("offline", "فحوصات deterministic أوفلاين (تكلفة: 0)", case_offline_deterministic_contracts, 0),
+        ("routes_english", "توجيه كل category — إنجليزي (تكلفة: 6 LLM)", lambda: case_routes_each_category_in_english(client, tokens["sales"]), 6),
+        ("routes_arabic", "توجيه كل category — عربي (تكلفة: 6 LLM)", lambda: case_routes_each_category_in_arabic(client, tokens["sales"]), 6),
+        ("hr_denial", "hr → سؤال property_listings (متوقع: denied + حفظ الرفض) (تكلفة: 1 LLM)",
+         lambda: case_hr_denial_saved(client, tokens["hr"]), 1),
+        ("sales_broad", "sales → سؤال عام متعدد المواضيع (متوقع: أكتر من category مسموحة) (تكلفة: 2 LLM)",
+         lambda: case_sales_broad_spans_allowed_scope(client, tokens["sales"]), 2),
+        ("hr_broad", "hr → نفس السؤال العام (متوقع: company_info_support بس) (تكلفة: 1 LLM)",
+         lambda: case_hr_broad_scoped_to_support_only(client, tokens["hr"]), 1),
+        ("memory", "memory — دورين في نفس المحادثة (تكلفة: 4 LLM)", lambda: case_memory_two_turns(client, tokens["sales"]), 4),
+        ("not_found", "سؤال ملوش علاقة (متوقع: الرد الجاهز + حفظه) (تكلفة: 1 LLM)",
+         lambda: case_not_found_canned_and_saved(client, tokens["sales"]), 1),
+        ("regressions", "regression — موديل مدفوع ونداء بدون Authorization (تكلفة: 0)",
+         lambda: case_regressions_no_llm_cost(client, tokens["sales"]), 0),
     ]
+    if only is not None:
+        known = {name for name, *_ in cases}
+        if unknown := only - known:
+            print(f"أسماء حالات مش معروفة في --only: {sorted(unknown)} | المعروفة: {sorted(known)}")
+            sys.exit(2)
+        cases = [case for case in cases if case[0] in only]
     failed = 0
-    for title, case, llm_cost in cases:
-        print(f"\n=== {title} ===")
+    for name, title, case, _llm_cost in cases:
+        print(f"\n=== {title} [{name}] ===")
         try:
             passed = case()
         except Exception as exc:
@@ -390,12 +398,25 @@ def run_cases(client: TestClient, user_ids: dict[str, UUID]) -> int:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="اختبار routing الـagent — يمكن تشغيل subset عبر --only")
+    parser.add_argument(
+        "--only",
+        help="أسماء الحالات المطلوب تشغيلها فقط (مفصولة بفواصل)، مثل: --only memory,hr_broad",
+    )
+    args = parser.parse_args()
+    only = {name.strip() for name in args.only.split(",") if name.strip()} if args.only else None
     # على Windows، لما الـoutput يتعمله redirect/pipe بيبقى cp1252 وبيقع مع العربي.
     sys.stdout.reconfigure(encoding="utf-8")
     load_dotenv()
-    user_ids = {role: find_user_id(role) for role in ("sales", "hr")}
-    if problems := missing_preconditions(user_ids):
+    if problems := missing_preconditions():
         print("المتطلبات مش جاهزة:\n" + "\n".join(f"  - {p}" for p in problems))
+        sys.exit(2)
+    try:
+        tokens = login_all(("sales", "hr"))
+    except RuntimeError as exc:
+        print("المتطلبات مش جاهزة:\n  - " + str(exc))
         sys.exit(2)
 
     # import هنا مش فوق: app.main بيعمل fail fast لو OPENROUTER_API_KEY ناقص،
@@ -407,7 +428,7 @@ def main() -> None:
     # بياخد loop جديد، والاتصال من الـloop المقفول بيقع بـ"Event loop is closed".
     with TestClient(app) as client:
         try:
-            failed = run_cases(client, user_ids)
+            failed = run_cases(client, tokens, only)
         finally:
             delete_created_conversations()
     sys.exit(1 if failed else 0)

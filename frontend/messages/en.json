@@ -1,0 +1,23 @@
+{
+  "auth": {
+    "title": "Sign in",
+    "subtitle": "With your Reel Estate account",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in…",
+    "errors": {
+      "invalidCredentials": "The email or password is incorrect. Check the account your admin created and try again.",
+      "emailNotConfirmed": "This account isn't activated yet. Ask your admin to activate it.",
+      "tooManyAttempts": "Too many attempts in a short time. Wait a minute and try again.",
+      "network": "Can't reach the sign-in service. Check your connection and try again.",
+      "generic": "Something went wrong while signing in. Try again in a moment."
+    }
+  },
+  "chat": {
+    "placeholderTitle": "Chat is coming in a later phase",
+    "placeholderBody": "Sign-in works — messages and answers will appear here once the chat UI is built.",
+    "signOut": "Sign out",
+    "loading": "Loading…"
+  }
+}

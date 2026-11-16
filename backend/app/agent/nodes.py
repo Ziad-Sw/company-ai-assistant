@@ -58,6 +58,8 @@ RETRIEVAL_RELEVANCE_THRESHOLD = 0.60
 
 MODEL_ERROR_MESSAGE = "الموديل مارجّعش رد — جرّب تاني أو اختار موديل تاني."
 EMPTY_ANSWER_MESSAGE = "الموديل رجّع رد فاضي — جرّب تاني أو اختار موديل تاني."
+# محاولات respond الإجمالية — الأولى + إعادة واحدة على الـstream الفاضي.
+_EMPTY_STREAM_MAX_ATTEMPTS = 2
 
 
 def load_history(state: AgentState) -> dict:
@@ -120,26 +122,39 @@ def retrieve(state: AgentState) -> dict:
 
 
 async def respond(state: AgentState) -> dict:
-    """الإجابة من الـcontext المفلتر بالصلاحيات — بنفس برومبت الـgrounded RAG بدون تغيير."""
+    """الإجابة من الـcontext المفلتر بالصلاحيات — بنفس برومبت الـgrounded RAG بدون تغيير.
+
+    فيه محاولة واحدة إضافية لو الـstream خلص من غير أي content — نفس فلسفة
+    retry الرد الفاضي في complete_chat: موديلات الـreasoning المجانية بتسحب
+    كامل ميزانية الـtokens في الـreasoning (finish_reason=length) والـcontent
+    بيرجع فاضي. الإعادة آمنة هنا لأن المحاولة الفاضية مابعتش ولا token
+    للـstream، فمافيش تكرار في النص المعروض."""
     writer = get_stream_writer()
     messages = [
         {"role": "system", "content": build_grounded_system_prompt(state["retrieved_chunks"])},
         *state["history"],
         {"role": "user", "content": state["question"]},
     ]
-    answer_parts: list[str] = []
-    try:
-        async for text in stream_chat_completion(state["model"], messages):
-            answer_parts.append(text)
-            writer({"type": "token", "text": text})
-    except APIError as exc:
-        logger.warning("OpenRouter streaming failed (model=%s): %r", state["model"], exc)
-        writer({"type": "error", "message": MODEL_ERROR_MESSAGE})
-        return {}
+    for attempt in range(_EMPTY_STREAM_MAX_ATTEMPTS):
+        answer_parts: list[str] = []
+        try:
+            async for text in stream_chat_completion(state["model"], messages):
+                answer_parts.append(text)
+                writer({"type": "token", "text": text})
+        except APIError as exc:
+            logger.warning("OpenRouter streaming failed (model=%s): %r", state["model"], exc)
+            writer({"type": "error", "message": MODEL_ERROR_MESSAGE})
+            return {}
 
-    # موديلات الـreasoning المجانية ساعات بتخلص من غير ولا token في content.
-    if not "".join(answer_parts).strip():
-        writer({"type": "error", "message": EMPTY_ANSWER_MESSAGE})
+        # موديلات الـreasoning المجانية ساعات بتخلص من غير ولا token في content.
+        if "".join(answer_parts).strip():
+            return {}
+        logger.warning(
+            "Empty answer stream (model=%s, attempt=%d/%d)",
+            state["model"], attempt + 1, _EMPTY_STREAM_MAX_ATTEMPTS,
+        )
+
+    writer({"type": "error", "message": EMPTY_ANSWER_MESSAGE})
     return {}
 
 

@@ -1,9 +1,15 @@
-"""GET /conversations و GET /conversations/{id} — تاريخ المحادثات للـsidebar (PRD 10.3)."""
+"""GET /conversations و GET /conversations/{id} — تاريخ المحادثات للـsidebar (PRD 10.3).
 
+الـuser_id بيجي من الـJWT المتحقق منه (app/auth/dependencies.py) — مش من
+الـclient — فكل موظف شايف محادثاته هو بس.
+"""
+
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.auth.dependencies import AuthenticatedUser, get_current_user
 from app.db.conversation_store import (
     ConversationSummary,
     StoredMessage,
@@ -21,26 +27,24 @@ class ConversationDetail(ConversationSummary):
 
 @router.get("", response_model=list[ConversationSummary])
 def get_conversations(
-    # TEMPORARY: replace with JWT-derived role/user_id once auth is built
-    user_id: UUID,
+    user: Annotated[AuthenticatedUser, Depends(get_current_user)],
 ) -> list[ConversationSummary]:
-    """محادثات الموظف، الأحدث الأول."""
-    return list_conversations(user_id)
+    """محادثات الموظف الحالي، الأحدث الأول."""
+    return list_conversations(user.user_id)
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 def get_conversation(
     conversation_id: UUID,
-    # TEMPORARY: replace with JWT-derived role/user_id once auth is built
-    user_id: UUID,
+    user: Annotated[AuthenticatedUser, Depends(get_current_user)],
 ) -> ConversationDetail:
     """
     المحادثة بكل رسايلها بالترتيب الزمني.
 
-    user_id مطلوب هنا كمان عشان موظف مايقدرش يفتح محادثة حد تاني بالـid بتاعها.
-    404 سواء المحادثة مش موجودة أو بتاعة حد تاني (مانكشفش إنها موجودة).
+    الـownership بيتحقق هنا كمان عشان موظف مايقدرش يفتح محادثة حد تاني بالـid
+    بتاعها. 404 سواء المحادثة مش موجودة أو بتاعة حد تاني (مانكشفش إنها موجودة).
     """
-    conversation = find_conversation(conversation_id, user_id)
+    conversation = find_conversation(conversation_id, user.user_id)
     if conversation is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="المحادثة مش موجودة.")
     return ConversationDetail(

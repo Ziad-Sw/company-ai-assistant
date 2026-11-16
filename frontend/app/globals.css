@@ -1,26 +1,87 @@
 @import "tailwindcss";
 
+/*
+ * توكنز الـDesign-System.md (Modern Slate Blue) — قيم light كافتراضي
+ * وقيم dark عبر prefers-color-scheme (الـtoggle اليدوي لما يتبني).
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+  color-scheme: light;
+  --brand-primary: #2563a3;
+  --brand-primary-hover: #1e5188;
+  --brand-primary-subtle: #e8f0f9;
+  --brand-bg-page: #f7f8fa;
+  --brand-bg-surface: #ffffff;
+  --brand-bg-sidebar: #eef1f5;
+  --brand-bg-input: #ffffff;
+  --brand-text-primary: #13181f;
+  --brand-text-secondary: #5b6472;
+  --brand-text-on-primary: #ffffff;
+  --brand-border: #e2e6eb;
+  --brand-border-strong: #c9cfd8;
+  --brand-success: #1e8e5a;
+  --brand-success-subtle: #e6f4ed;
+  --brand-warning: #b07d1e;
+  --brand-warning-subtle: #fbf1df;
+  --brand-error: #c0392b;
+  --brand-error-subtle: #fbeae8;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* أسماء منفصلة (--brand-radius-*) عشان mapping الـ@theme inline ميبقاش self-reference. */
+  --brand-radius-sm: 6px;
+  --brand-radius-md: 10px;
+  --brand-radius-lg: 16px;
+  --brand-radius-full: 999px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    color-scheme: dark;
+    --brand-primary: #4d8fd6;
+    --brand-primary-hover: #6ba3e0;
+    --brand-primary-subtle: #1a2a3d;
+    --brand-bg-page: #13181f;
+    --brand-bg-surface: #1b212b;
+    --brand-bg-sidebar: #10151c;
+    --brand-bg-input: #1f2630;
+    --brand-text-primary: #f2f4f7;
+    --brand-text-secondary: #9aa4b2;
+    --brand-text-on-primary: #ffffff;
+    --brand-border: #262d38;
+    --brand-border-strong: #38424f;
+    --brand-success: #3fbe82;
+    --brand-success-subtle: #163626;
+    --brand-warning: #d9a23e;
+    --brand-warning-subtle: #352a14;
+    --brand-error: #e35b4c;
+    --brand-error-subtle: #3a1917;
   }
 }
 
+@theme inline {
+  --color-primary: var(--brand-primary);
+  --color-primary-hover: var(--brand-primary-hover);
+  --color-primary-subtle: var(--brand-primary-subtle);
+  --color-page: var(--brand-bg-page);
+  --color-surface: var(--brand-bg-surface);
+  --color-sidebar: var(--brand-bg-sidebar);
+  --color-input: var(--brand-bg-input);
+  --color-foreground: var(--brand-text-primary);
+  --color-muted: var(--brand-text-secondary);
+  --color-on-primary: var(--brand-text-on-primary);
+  --color-border: var(--brand-border);
+  --color-border-strong: var(--brand-border-strong);
+  --color-success: var(--brand-success);
+  --color-success-subtle: var(--brand-success-subtle);
+  --color-warning: var(--brand-warning);
+  --color-warning-subtle: var(--brand-warning-subtle);
+  --color-error: var(--brand-error);
+  --color-error-subtle: var(--brand-error-subtle);
+  --radius-sm: var(--brand-radius-sm);
+  --radius-md: var(--brand-radius-md);
+  --radius-lg: var(--brand-radius-lg);
+  --radius-full: var(--brand-radius-full);
+  --font-sans: var(--font-inter), var(--font-plex-arabic), sans-serif;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-inter), var(--font-plex-arabic), sans-serif;
 }

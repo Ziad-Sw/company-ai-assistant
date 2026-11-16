@@ -282,3 +282,131 @@
 - **ملاحظة على الموديل المثبّت:** nemotron لسه بيرجع ساعات content فاضي حتى في الـstreaming (خداع Phase 1 المعروف) — بيطلع `error` event ومافيش حفظ (نفس عقد Phase 1). لو تكرر في rerun، التبديل سطر واحد في `CHAT_MODEL` بالسكريبتين (الموديل ده للـاختبار بس، والـdropdown مش متأثر).
 
 **الحالة:** ⚠️ تم جزئياً — الكود كله مكتوب والبنية والفحوصات الـdeterministic + 8 حالات live اتأكدوا (4/4 كاملة في test_chat_endpoint + التوجيه في الاتجاهين بتأكيد جزئي + memory node مباشرة). الباقي محتاج rerun بعد رجوع الـquota اليومي بس، ومفيش أي تغيير كود متوقع له.
+
+## [2026-11-12] — تشخيص وإصلاح الرد الفاضي في مسار الإجابة (respond/streaming)
+
+**تم:**
+- **تشخيص بالقياس مش بالتخمين:** سكريبت تشخيصي (`backend/scripts/diagnose_empty_responses.py` — أداة تشخيص قابلة لإعادة الاستخدام، patch وقت التشغيل من غير أي تعديل production code) شغّل حالتي `hr_broad` و`memory` من `test_agent_routing.py` بـ3 محاولات لكل واحدة مع تسجيل الـresponse الخام كامل من OpenRouter. فحص الـquota: ~18 LLM request من الـ50 المجانية في اليوم (الحالتين اتحاولوا بـ2-3 مرات كل واحدة زي ما التشخيص طلب).
+- **السبب الجذري المثبت من الـraw response (مش متخمين):** نداء الإجابة (`stream_chat_completion`) بيخلص بـ`finish_reason="length"` و**كل الـ2048 tokens بتاعة الميزانية اتحرقت في reasoning tokens** والـcontent صفر (المقاس: `reasoning_tokens=2048, content=0` على nemotron). السؤال العام/الملتبس (hr_broad) بيحرّض reasoning طويل بشكل شبه حتمي (فشل 2/3 — والمحاولة الناجحة عدّت بالعافية بـ42 token بس للـcontent)، وmemory فشل مرة كـflake لأن الـreasoning بيتراوح 554–1446 token بين التشغيلات.
+- **فجوة قائمة من قبل — مش regression:** الـsingle-retry-on-empty في `complete_chat()` بيغطي **قرار الـcategory بس** (نداء non-streaming). نداء الإجابة streaming (`stream_chat_completion`) كان من غير **أي** retry خالص — الإصلاح ده بيقفل فجوة موجودة أصلاً.
+- **الإصلاح (Option E المعتمد):**
+  1. `openrouter_client.py`: سقف الـanswer call (`_MAX_OUTPUT_TOKENS`) بقى **4096** بدل 2048 — الـdecision call (`_DECISION_MAX_TOKENS=2048`) زي ما هو بالظبط، التغيير scoped للإجابة بس.
+  2. `nodes.py` node الـ`respond`: **retry واحد** لو الـstream خلص من غير أي content (نفس فلسفة retry الرد الفاضي في `complete_chat`). المحاولة الأولى الفاضية بتُسجّل في اللوج وبتعاد المحاولة؛ لو المحاولة التانية برضه فاضية → نفس `error` event (`EMPTY_ANSWER_MESSAGE`) زي اليوم بالظبط، من غير أي retry إضافي. الـretry آمن من التكرار لأن المحاولة الفاضية مابعتش ولا token للـstream. الـ`APIError` (rate limit/شبكة) برضه بيفشل فوراً زي قبل — مش بيتعمله retry (scoped للـempty stream بس).
+- تشخيص مقارن لرسالتي الخطأ: `MODEL_ERROR_MESSAGE` ("مارجّعش رد" — مسار APIError) و`EMPTY_ANSWER_MESSAGE` ("رجّع رد فاضي" — مسار المحتوى الصفري) حالتين مختلفتين، والفشل المقاس كان التانية.
+- **مش يتشغّل في المهمة دي (بقرار موفر للـquota):** مفيش rerun كامل لـ`test_agent_routing.py`. إعادة التحقق من `hr_broad` و`memory` تحديداً بتتم في مهمة منفصلة لما الـquota يسمح (سكريبت التشخيص أو `--only memory,hr_broad` في سكريبت الاختبار).
+- Guard passes على التغيير: **Code Security** (مفيش secrets/input جديدة — التغيير منطق retry وسقف tokens بس، مفيش سطح هجوم جديد، اللوج مابيعرضش محتوى حساس) و**Clean Code Guard** (مفيش تعليقات "what"، الـloop محكم، الـconstant باسم معبّر، نفس ستايل الملف، مفيش منطق مكرر — الفحص mirrored مش shared لأن شكلي النداءين مختلف: non-streaming content truthiness مقابل join+strip على parts الـstream).
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/llm/openrouter_client.py — `_MAX_OUTPUT_TOKENS` 2048→4096 (answer call بس) + تعليق السبب بالمقاس الفعلي
+- backend/app/agent/nodes.py — retry واحد على الـstream الفاضي في `respond` + `_EMPTY_STREAM_MAX_ATTEMPTS = 2` + تحديث docstring
+- backend/scripts/diagnose_empty_responses.py — سكريبت تشخيص خام جديد (أداة، مش production code)
+- backend/scripts/test_agent_routing.py — `--only` CLI filter لتشغيل subset من الحالات (للـreruns المقيدة بالـquota)
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- الـretry الاتنين بيتعاملوا مع نفس الميكانيزم لكن في مستويات مختلفة عمداً: `complete_chat` (decision، non-streaming) بيـretry في الـclient، و`respond` (answer، streaming) بيـretry في الـnode — الـstreaming مش ممكن يتغلف بنفس الشكل لأن tokens بتتكتب على الـstream أول ما توصل، والـretry على مستوى الـnode هو اللي بيضمن مافيش تكرار.
+- سقف 4096 مازال محدود عمداً (مش مرفوع لانهائي) للحفاظ على الحماية الأصلية ضد الـloop اللي مش بيقفل — والـretry بيغطي الذيل الاحتمالي لو reasoning عدّى 4096.
+
+**الحالة:** ✅ تم — الإصلاح متطبق ومتراجع بالـguard passes؛ التحقق live من الحالتين مؤجل لrerun بعد الـquota.
+
+## [2026-11-13] — إقفال مرحلة الـLangGraph Agent رسمياً (verification + استثناء موثّق وحيد)
+
+**تم:**
+- **إقفال التحقق الرسمي لمرحلة الـAgent:** 8/9 حالات في `test_agent_routing.py` بتعدّي بشكل مستقر مع الموديل المثبّت للاختبار `nvidia/nemotron-3.5-lightning:free` — شامل التوجيه باللغتين (إنجليزي + عربي لكل الـ3 categories)، الرفض المحفوظ، السؤال العام لـsales (scope كامل)، سؤال "مش لاقي" بالرد الجاهز، الـregressions (موديل مدفوع/دور غريب → 422)، وحالة الـmemory (دورين في نفس المحادثة) بعد إصلاح ميزانية الـtokens + الـretry.
+- **الاستثناء الموثّق (مقبول، مش open-ended):** حالة `hr_broad` — السؤال العام الـ3-أجزاء ("What units are available, how much do they cost, and how can I contact the company?") مع دور hr. التشخيص بالمقياس (سكريبت `diagnose_empty_responses.py` مع raw responses، وسكريبت `diagnose_hr_broad_prompt.py` بدون أي LLM) أثبت إنها **quirk سلوك للموديل ده على شكل السؤال ده تحديداً** (سؤال أجزاؤه الأغلب مش قابلة للإجابة جوه scope الـhr — company_info_support بس)، **مش** مشكلة prompt (أصغر من 2 من الـprompts اللي بتعدّي — ~974 token مقابل 999–1146، 5 chunks من مستند واحد وبدون أي تكرار) **مش** مشكلة retrieval، ومش مشكلة في منطق routing/الصلاحيات نفسه.
+- **نطاق الاستثناء:** الحدودة دي scoped للموديل المثبّت للـاختبار **فقط** (`CHAT_MODEL` في سكريبتات الاختبار) — المستخدمين النهائيين بيختاروا بحرية من `GET /models` والموديلات المجانية كلها، ومنطق الـLangGraph (routing + فحص الصلاحية + memory) متأكد صح من الحالات الـ8 التانية + الفحص المباشر لخرج `retrieve_chunks()` لنفس السؤال ده بالظبط في سكريبت التشخيص.
+- **تحقيق البديل: مُقفل كتحقيق منتهي (مش معلّق):** 3 محاولات لتجربة موديل بديل للاختبار (`google/gemma-4-31b-it:free`) كلها اتوقفت بعوائق بنية تحتية (infrastructure) خالص — (1) quota يومية مستنفدة، (2) افتراض غلط لنافذة reset (OpenRouter بتعيد الحد عند منتصف الليل UTC مش rolling 24h — مثبت بـ`X-RateLimit-Reset`)، (3) rate limit من الـprovider المشترك upstream لجوجل (`upstream_provider_shared_pool`). صفر requests حقيقية من الموديل المرشح في التلات محاولات، ومفيش أي فشل سلوكي فعلي منه. القرار: وقف البحث عن موديل بديل والاحتفاظ بنيموترون كـ`CHAT_MODEL` للاختبار مع الاستثناء الموثّق.
+- **ملاحظة تشغيلية للـquota:** حد الـfree tier بيعدّ عند منتصف الليل UTC (`free_model_daily_requests` في `GET /key` — used/limit/remaining)، والـ429 المرفوضة مش بتستهلك من الحد — يُفحص `remaining > 0` قبل أي rerun عشان مايتبهدلش وقت تشغيلة كاملة على 429.
+- **التعليمات للمهام القادمة:** rerun الحالتين (`--only memory,hr_broad`) بعد أي تغيير جوهري في الـretrieval/الـprompts يكون اختياري وليس شرط لإقفال المرحلة؛ حالة `hr_broad` بتتحسّن لو اتغيّر الموديل المستخدم في الاختبار مستقبلاً بقرار صريح، أو لو الـself-check node (المخطط له بين retrieve وrespond) اتضاف في Phase لاحقة.
+
+**ملفات اتعملت/اتعدلت:**
+- docs/PROGRESS.md — الإدخال ده بس (مفيش أي تعديل كود في المهمة دي)
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- قرار "قبول الاستثناء بدل مُواصلة البحث" مبني على تلات محاولات infra وقراين التشخيص الكمّي — مش على نفاد الصبر: التشخيص بيوضّح إن الحالة دي بتقيس سلوك موديل على شكل سؤال ملتبس، إنما منطق الـagent (routing/صلاحيات/حفظ) متغطي كامل من الحالات التانية.
+- الحالات الـ7 اللي فيها ثقة جزئية من تشغيلات سابقة (test_chat_endpoint 4/4 + توجيه جزئي) اتحوّلت لـ8/9 مثبتة بعد الإصلاحات + reruns في الجلسات دي.
+
+**الحالة:** ✅ تم — مرحلة الـLangGraph Agent (category routing + فحص الصلاحية + memory) **متحقق منها ومقفولة رسمياً** مع استثناء موثّق وحيد (hr_broad على الموديل المثبّت للاختبار)، ومفيش أي عمل مفتوح.
+
+## [2026-11-13] — تحقيق قبل بناء الـAuthentication: الحسابات التجريبية + مسار role/user_id في الـbackend
+
+**تم:**
+- **تحقيق استكشافي بسؤالين** (Investigation only — مفيش أي تعديل كود ولا commit):
+  1. هل حسابات الـdemo التلاتة موجودة كمستخدمين حقيقيين في Supabase Auth (schema `auth.users`) مش مجرد rows في `profiles`؟ وهل الربط بين الجدولين سليم؟
+  2. إزاي `role` و`user_id` بيوصَلوا للـendpoints دلوقتي — body/query params ولا JWT حقيقي؟
+- **سكريبت رمي (throwaway)** استعلم `auth.users` + `public.profiles` مباشرة عبر اتصال الـDATABASE_URL الحالي (نفس `get_session_factory()`)، واتمسح بعد الاستخدام (مش في الـversion control).
+- **نتيجة 1 — الحسابات التجريبية: ✅ متزرعة صح في Auth:**
+  - `auth.users` فيه بالظبط **3 مستخدمين** (من غير أي مستخدم زايد) بإيميلات `admin@reelestate.demo` / `sales@reelestate.demo` / `hr@reelestate.demo`، كلهم `email_confirmed=True` وعندهم `encrypted_password` (قابلين لتسجيل الدخول فعلاً)، اتعملوا 2026-11-09 (seed الـPhase 0).
+  - كل واحد فيهم متطابق 1:1 مع row في `profiles` بنفس الـUUID ونفس الـrole المتوقع (admin/sales/hr) — **0 NULL و0 placeholder UUIDs**.
+- **نتيجة 2 — بنية الربط الفعلية (مهمة لبناء الـAuth):** schema `profiles` الفعلي هو `(id uuid PK, full_name, role, created_at)` — **مفيش عمود `user_id`**، والربط بـauth.users بيحصل عبر **`profiles.id = auth.users.id`** (نمط Supabase الاعتيادي). ده **مختلف عن المقترح في Tech-Stack.md قسم 3** اللي بيقول `profiles` فيها عمود `user_id` — الملف محتاج تحديث لما الـAuth يتبنى.
+- **نتيجة 3 — مسار role/user_id دلوقتي: fake/pre-auth بالكامل (query/body params):**
+  - `POST /chat` (backend/app/api/chat.py:59-63): `role: str` و`user_id: UUID` حقول **عادية في الـrequest body** (Model `ChatRequest`) — الـrole بس متحقق منه إنه من الـroles المعروفة (`_role_is_known` validator، chat.py:69-74) لكن مفيش أي إثبات هوية. عمودين عليهما تعليق `TEMPORARY: replace with JWT-derived role/user_id once auth is built` صراحةً.
+  - `GET /conversations` و`GET /conversations/{id}` (backend/app/api/conversations.py:24-25,34-35): `user_id` **query parameter** عادي، بنفس تعليق TEMPORARY — يعني أي حد يقدر يقرا محادثات أي موظف لو عرف الـUUID بتاعه (حتى الـ404 ownership check في conversations.py:43 بيعتمد على الـuser_id المُمَرَّر مش على هوية موثّقة).
+  - `POST /admin/*`: مش موجودة أصلاً في `backend/app/api/` (الموجود بس `chat.py` و`conversations.py` و`models.py`) — لما تتبنى لازم JWT/role check من أول يوم.
+  - **مفيش أي JWT handling في الـbackend خالص:** بحث شامل عن jwt/verify/decode/Authorization مارجعش غير تعليقات/documentation (`supabase_client.py:9` بيفهم JWT كتوضيح لفكرة RLS بس). ملف `app/db/supabase_client.py` بيتحقق من وجود `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` (service_role بيتخطى RLS — للسكريبتات) لكن مش بيستخدم في الـauth flow الإطلاقاً.
+- **خلاصة جاهزة لبناء الـAuth (خطوة جاية):** كل الحسابات جاهزة في Auth، و`profiles.id` هو مفتاح الربط؛ المطلوب: (1) التحقق من JWT بتاع Supabase (`Authorization: Bearer <access_token>`) بفحص signature + expiry مش decode بس، (2) استخراج `user_id` من الـtoken مش من الـclient، (3) `role` يتقرا من `profiles` على السيرفر (مش من الـclient زي دلوقتي — دلوقتي أي حد يقدر يبعت `role=admin` في الـbody وياخد scope الـadmin في /chat).
+
+**ملفات اتعملت/اتعدلت:**
+- docs/PROGRESS.md — الإدخال ده بس (سكريبت الاستعلام كان رمي واتمسح بعد الاستخدام)
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- الانحراف عن Tech-Stack.md قسم 3 (profiles بدون user_id، والربط عبر id) مسجل هنا عشان يتحدّث الملف أو يتظبط المرجعية وقت بناء الـAuth.
+- ملاحظة أمان تشغيلية: الـRLS لسه مش مطبّق حسب تعليق `retrieval.py:8` (الفلترة الحالية كود تطبيق بس) — التحقق من الـJWT لما يتبنى لازم يتعامل مع النقطة دي في نفس المرحلة.
+
+**الحالة:** ✅ تم — تحقيق مكتمل بالأدلة: الحسابات جاهزة ومتزروعة صح في Auth، ومسار role/user_id الحالي fake/pre-auth بالكامل (body/query params بدون JWT) — جاهزين لبدء بناء الـAuthentication على أساس واقعي مش مفترض.
+
+## [2026-11-13] — تصحيح توثيقي: وصف جدول `profiles` في Tech-Stack.md بقى مطابق للـschema الفعلي
+
+**تم:**
+- تصحيح توثيق بس (documentation correction) — **مفيش أي تغيير كود ولا في schema.sql**.
+- **اللي كان غلط:** Tech-Stack.md قسم 3 (جدول "الجداول المقترحة") كان بيوصف `profiles` بعمود `user_id` وعمود `email`. الـschema الفعلي (`backend/app/db/schema.sql:10-15`) والتحقيق المباشر على الداتابيز الحقيقية بيثبتوا إن الجدول هو `(id uuid PK references auth.users(id) on delete cascade, full_name, role, created_at)` — **مفيش عمود user_id خالص** (مفتاح الربط هو `profiles.id = auth.users.id` نفسه)، ومفيش عمود email (الإيميل عايش في `auth.users` بس).
+- **بقى يقول إيه:** صف `profiles` في Tech-Stack.md دلوقتي بيقول `id (PK متطابق مع auth.users.id — مش عمود user_id)، role، full_name، created_at — الإيميل في auth.users مش هنا (schema.sql الفعلي هو المرجع)`. باقي مراجع `user_id` في الملف (جدول `conversations` مثلاً) صح ومتزروعة — `conversations.user_id references profiles(id)` فعلاً (schema.sql:55).
+- **ليه مهم قبل الـAuth:** أي استعلام سيتبنى على `profiles.user_id` هيضرب `UndefinedColumn` فوراً — التصحيح بيمنع إن مرحلة الـAuthentication تبني كود على عمود مش موجود (كان متسجل كملاحظة مفتوحة في إدخال التحقيق قبل ده، واتقفل دلوقتي).
+
+**ملفات اتعملت/اتعدلت:**
+- docs/Tech-Stack.md — صف واحد في جدول قسم 3 بس (الصف اللي بيوصف `profiles`)
+- docs/PROGRESS.md — الإدخال ده
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- تصحيح الـ`email` في نفس الصف دخل ضمن نطاق "وصف جدول profiles" لأن الادعاءين الغلطكان (user_id وemail) في نفس السطر — سِبَهم في توثيق مغلوط هيضلّل مبنى الـAuth بنفس الطريقة.
+
+**الحالة:** ✅ تم — التوثيق بقى مطابق للـschema الفعلي والملاحظة المفتوحة من إدخال التحقيق اتقفلت.
+
+## [2026-11-14] — المرحلة: Authentication كامل — JWT verification + RLS + واجهة الدخول
+
+**تم:**
+- **الـbackend** — استبدال shortcut الـTEMPORARY (role/user_id من الـrequest) بمصادقة حقيقية:
+  - موديول `app/auth/`: التحقق من JWT بتاع Supabase (JWKS الأول مع cache، وfallback لـHS256 على `SUPABASE_JWT_SECRET` لو الـJWKS مش متاح)، ورفض `aud != "authenticated"`. `get_current_user` بيقرا الـuser_id من الـ`sub` الموقّع بس، والـrole/full_name من `profiles` على السيرفر. `require_admin` للـendpoints الإدارية (Phase 3).
+  - `GET /me` جديد (محمي) بيرجع `{user_id, role, full_name}` — مصدر الـprofile في الواجهة.
+  - `POST /chat`: الـauth الأول قبل أي فحص تاني (بدون Authorization → 401 حتى لو الموديل مدفوع)، ومفيش role/user_id في الـbody خالص؛ الـownership والـagent state بيتقروا من الـidentity المتحقق منها.
+  - `GET /conversations` + `GET /conversations/{id}`: الـuser_id من الـtoken (مفيش query param) — كل موظف شايف محادثاته هو بس، و404 موحد لمش موجودة/بتاعة حد تاني.
+  - CORS: `Authorization` مسموح في الـheaders.
+- **الـRLS** — `migrations/002_rls_policies.sql` اتنفّذت على الداتابيز الحقيقية: RLS على profiles/documents/chunks/conversations/messages/eval_runs (وaudit_logs بحارس لوجودها — الجدول لسه مش متإنشا)، وpolicies مطابقة لمصفوفة الصلاحيات + ownership، مع `get_my_role()` SECURITY DEFINER لمنع الـrecursion. Negative control: الـanon key مرفوض على كل الجداول. ملاحظة معتمدة: اتصال الـbackend بـPostgres بيتخطى RLS بالتصميم (owner) — الحماية الفعلية كود الـapp، والـRLS ضد الوصول المباشر بالـanon key.
+- **الـfrontend** — واجهة الدخول + إدارة الجلسة: صفحة `/login` (bilingual en/ar، tokens الـDesign-System)، `@supabase/supabase-js` للـlogin والـsilent refresh و`onAuthStateChange`، `authStore` (Zustand + persist — للعرض بس)، `lib/api/client.ts` (fetch wrapper بـAuthorization + refresh قبل الخلاص + redirect لصفحة الدخول على فشل الـrefresh أو 401)، `RequireAuth`/`RequireAdmin` (حماية عرض بس)، components/ui (Button/Input من الـtokens)، globals.css بتوكنز Modern Slate Blue (light+dark)، root layout بـ[locale] (النمط الرسمي للـi18n في Next 16) و`global-not-found.tsx`، وplaceholder لـ/chat بيأكد المسار كامل شغال.
+- **الاختبارات** — `scripts/demo_auth.py` (password grant حقيقي للحسابات الـdemo) + إعادة كتابة `test_chat_endpoint.py` و`test_agent_routing.py` على Bearer tokens: النتيجة 5/5 و8/9 (الفشل الوحيد hr_broad — نفس quirk الموديل الموثق يوم 2026-11-13، مش كود). بلاش تكلفة: offline deterministic + regressions (موديل مدفوع → 422، بدون Authorization → 401).
+- **الـskill passes الإلزامية** — clean-code-guard على كل الكود الجديد (نضيف — مفيش تعديلات)، web-design-guidelines على الـlogin UI (اتصلحت: radius tokens كانت self-reference في @theme، وcolor-scheme، وtheme-color، وname/autocomplete للحقول، وfocus-visible للـInput)، ux-writing على رسايل الدخول (ellipsis في حالات التحميل + translate="no" للـwordmark)، test-guard على السكريبتات (نضيف).
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/auth/__init__.py، backend/app/auth/verification.py، backend/app/auth/dependencies.py — الجديدة (المصادقة)
+- backend/app/api/me.py — الجديدة (GET /me)
+- backend/app/api/chat.py، backend/app/api/conversations.py، backend/app/main.py — إزالة role/user_id من الـrequest + الـauth في كل endpoint
+- backend/app/db/migrations/002_rls_policies.sql — الجديدة (اتنفّذت على الداتابيز الحقيقية)
+- backend/.env.example — أضيف `SUPABASE_JWT_SECRET=` (اختياري)
+- backend/scripts/demo_auth.py — الجديدة (login للحسابات الـdemo)
+- backend/scripts/test_chat_endpoint.py، backend/scripts/test_agent_routing.py — إعادة كتابة على Bearer tokens
+- frontend/app/[locale]/layout.tsx، app/[locale]/(auth)/login/page.tsx، app/[locale]/(chat)/chat/page.tsx، app/[locale]/(admin)/layout.tsx، app/global-not-found.tsx، app/globals.css — الجديدة (الـrouting والـlayout والصفحات والتوكنز)
+- frontend/features/auth/{api/supabase.ts، api/me.ts، types.ts، hooks/useAuth.ts، components/LoginForm.tsx، components/RequireAuth.tsx، components/ChatPlaceholder.tsx، components/SessionSync.tsx} — الجديدة
+- frontend/store/authStore.ts، frontend/lib/api/client.ts، frontend/lib/utils.ts، frontend/components/ui/{Button.tsx، Input.tsx}، frontend/i18n/{routing.ts، request.ts}، frontend/messages/{en.json، ar.json}، frontend/next.config.ts، frontend/.env.local(.example) — الجديدة
+- docs/Tech-Stack.md — قسم 6 اتكتب من جديد بالقرارات الخمسة والـtrade-offs، قسم 2 فيه GET /me وتعليم الحماية، قسم 1 فيه supabase-js، قسم 11 فيه الـJWT secret
+- docs/PROGRESS.md — الـentry ده
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- **الخمس قرارات الـarchitecture** (موثقة بالكامل في Tech-Stack.md قسم 6): (1) JWKS الأول + HS256 fallback، (2) الـrole دايماً من profiles على السيرفر، (3) RLS طبقة ثانوية والـapp code هو الحماية الفعلية، (4) GET /models عامة عمداً، (5) silent refresh + redirect-on-401. الـrate limiting متأجل قرار (خارج المرحلة).
+- **audit_logs مش موجود في الداتابيز الحقيقية** (جدول Phase 3) — الـmigration عملت حارس `to_regclass` بدل ما تكسر.
+- **next-intl/plugin مااتاستخدمش**: native binding بتاع @swc/core بايظ في البيئة دي (LoadLibraryExW بيفشل حتى بعد إعادة التثبيت) — الـalias بتاع `next-intl/config` → `i18n/request.ts` اتعمل يدوي في next.config.ts. **متعملش رجوع لـcreateNextIntlPlugin**.
+- **`instant = false` على layout الـ[locale]** — blocking route مقصود: الـlayout بيقرا الـlocale من الـparams للـhtml lang/dir، وcacheComponents كان بيرفض prerender من غيرها.
+- **UX Writing kit مش موجود محلياً** (voice-tone.md مش مثبت — KIT_MISSING) — الرسايل اتكتبت على أساس مبادئ الـskill المدمجة. لو الـkit اتثبت، يعاد فحص الرسايل عليه.
+- **hr_broad لسه بيفشل** — نفس quirk الموديل الموثق يوم 2026-11-13 (سلوك موديل، مش كود) — بيتقاس في الـgolden dataset بتاع RAGAS في Phase 4.
+- **VerifyAuth = حماية عرض بس** — مكتوبة في التعليقات وفي قسم 6 إن التفويض الفعلي على الـbackend.
+- فحص quota قبل تشغيل الاختبارات: 50/50 متاحة (بتتصفّر كل نص الليل UTC) — الاختبارات استهلكت ~24.
+
+**الحالة:** ✅ تم — المصادقة كاملة (backend + RLS + frontend) والاختبارات عايشة على الـBearer tokens والـdocs متحدثة. فحص إضافي مقترح في المتصفح يدوي (login → /chat بـالحسابات الـdemo) لما تستريح مع الـUI.

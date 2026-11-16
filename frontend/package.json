@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "@swc/core": "^1.16.22",
     "next": "16.4.5",
     "next-intl": "^4.14.9",
     "react": "19.3.0",
@@ -24,5 +26,9 @@
     "eslint-config-next": "16.4.5",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "allowScripts": {
+    "@swc/core@1.16.22": true,
+    "@parcel/watcher@2.6.0": true
   }
 }

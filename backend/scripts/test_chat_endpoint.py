@@ -5,9 +5,9 @@
     python -m scripts.test_chat_endpoint
 
 محتاج قبل التشغيل (السكريبت بيتأكد منهم الأول ويقولك الناقص):
-  - OPENROUTER_API_KEY وDATABASE_URL وGEMINI_API_KEY في الـ.env
+  - OPENROUTER_API_KEY وDATABASE_URL وGEMINI_API_KEY وSUPABASE_URL وSUPABASE_ANON_KEY في الـ.env
   - migrations/001_add_messages_sources.sql متطبّقة
-  - موظف sales وموظف hr على الأقل في profiles (docs/demo-accounts.md)
+  - حسابات الـdemo (sales وhr) قابلة لتسجيل الدخول في Supabase Auth (docs/demo-accounts.md)
 
 بيستهلك: 1 request من Gemini embedding لكل نداء /chat، ونداءات chat من الـ50
 المجانية في اليوم بتاعة OpenRouter (الرد المولّد = 2: تحديد الـcategory + الإجابة،
@@ -19,7 +19,6 @@
 import json
 import sys
 from collections.abc import Callable
-from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
@@ -29,6 +28,7 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.db.session import get_session_factory
+from scripts.demo_auth import login_all
 
 # موديل محدد ومسمّى مش الـauto-router (openrouter/free): الـrouter بيختار موديل
 # عشوائي وممكن يرجّع رد فاضي أو rate limit، فالاختبار بيبقى غير deterministic.
@@ -38,13 +38,6 @@ PAYMENT_QUESTION = "ما هي نسبة الدفعة المقدمة في خطة �
 PROPERTY_QUESTION = "Is there a fully finished villa with a private garden available?"
 
 created_conversation_ids: list[str] = []
-
-
-def find_user_id(role: str) -> UUID | None:
-    with get_session_factory().begin() as session:
-        return session.execute(
-            text("SELECT id FROM public.profiles WHERE role = :role LIMIT 1"), {"role": role}
-        ).scalar_one_or_none()
 
 
 def has_sources_column() -> bool:
@@ -57,12 +50,8 @@ def has_sources_column() -> bool:
         ).scalar_one_or_none() is not None
 
 
-def missing_preconditions(user_ids: dict[str, UUID | None]) -> list[str]:
-    problems = [
-        f"مفيش موظف role={role} في profiles — اعمل seed للـdemo accounts (docs/demo-accounts.md)"
-        for role, user_id in user_ids.items()
-        if user_id is None
-    ]
+def missing_preconditions() -> list[str]:
+    problems = []
     if not has_sources_column():
         problems.append("عمود messages.sources مش موجود — طبّق migrations/001_add_messages_sources.sql")
     try:
@@ -81,29 +70,27 @@ def parse_sse(body: str) -> list[tuple[str, dict]]:
     return events
 
 
-def post_chat(client: TestClient, body: dict) -> Response:
-    response = client.post("/chat", json=body)
+def post_chat(client: TestClient, token: str, body: dict) -> Response:
+    response = client.post("/chat", json=body, headers={"Authorization": f"Bearer {token}"})
     if conversation_id := response.headers.get("x-conversation-id"):
         created_conversation_ids.append(conversation_id)
     return response
 
 
-def sales_payment_body(user_id: UUID) -> dict:
+def payment_body() -> dict:
     # مفيش category: بتتحدد جوه الـagent من السؤال (السؤال واضح إنه payment_policies).
-    return {
-        "message": PAYMENT_QUESTION, "role": "sales", "user_id": str(user_id),
-        "model": CHAT_MODEL,
-    }
+    # مفيش role ولا user_id: بيتقروا من الـJWT على السيرفر (app/auth/dependencies.py).
+    return {"message": PAYMENT_QUESTION, "model": CHAT_MODEL}
 
 
-def conversation_ids(client: TestClient, user_id: UUID) -> list[str]:
-    response = client.get("/conversations", params={"user_id": str(user_id)})
+def conversation_ids(client: TestClient, token: str) -> list[str]:
+    response = client.get("/conversations", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
     return [conversation["id"] for conversation in response.json()]
 
 
-def stored_messages(client: TestClient, conversation_id: str, user_id: UUID) -> list[dict]:
-    response = client.get(f"/conversations/{conversation_id}", params={"user_id": str(user_id)})
+def stored_messages(client: TestClient, conversation_id: str, token: str) -> list[dict]:
+    response = client.get(f"/conversations/{conversation_id}", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
     return response.json()["messages"]
 
@@ -117,9 +104,21 @@ def case_models_lists_chat_model(client: TestClient) -> bool:
     return CHAT_MODEL in ids
 
 
-def case_sales_chat_streams_and_persists(client: TestClient, user_id: UUID) -> bool:
+def case_unauthenticated_rejected(client: TestClient) -> bool:
+    """/chat من غير Authorization → 401 قبل أي كتابة (مش 422 ولا 403 بلسيبة)."""
+    before = client.get("/conversations")
+    response = client.post("/chat", json=payment_body())
+    after = client.get("/conversations")
+    print(
+        f"  /chat بدون token: {response.status_code} (متوقع 401) | "
+        f"/conversations بدون token: {before.status_code} و{after.status_code} (متوقع 401)"
+    )
+    return response.status_code == 401 and before.status_code == 401 and after.status_code == 401
+
+
+def case_sales_chat_streams_and_persists(client: TestClient, token: str) -> bool:
     """Sales → tokens بـSSE، وبعدين الرد نفسه والمصادر نفسها يتحفظوا في messages."""
-    response = post_chat(client, sales_payment_body(user_id))
+    response = post_chat(client, token, payment_body())
     print(f"  status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -135,25 +134,22 @@ def case_sales_chat_streams_and_persists(client: TestClient, user_id: UUID) -> b
     sources = events[-1][1]["sources"]
     print(f"  المصادر: {sorted({(s['doc_title'], s['version']) for s in sources})}")
     conversation_id = response.headers["x-conversation-id"]
-    messages = stored_messages(client, conversation_id, user_id)
+    messages = stored_messages(client, conversation_id, token)
     return (
         bool(sources)
         and [m["role"] for m in messages] == ["user", "assistant"]
         and messages[1]["content"] == answer
         and messages[1]["sources"] == sources
-        and conversation_id in conversation_ids(client, user_id)
+        and conversation_id in conversation_ids(client, token)
     )
 
 
-def case_hr_property_listings_denied(client: TestClient, user_id: UUID) -> bool:
+def case_hr_property_listings_denied(client: TestClient, token: str) -> bool:
     """HR يسأل سؤال واضح إنه property_listings → الـagent يوجّهه هناك → فحص الصلاحية
     بيرفض: event واحد denied، والرفض **بيتحفظ** كرد assistant بنص رسالة الرفض
     بالظبط (بدون أي تفاصيل داخلية زي الـcategory المقترحة) — قرار معتمد في
     Phase 2 (قبل كده الرفض مكانش بيتحفظ خالص)."""
-    response = post_chat(client, {
-        "message": PROPERTY_QUESTION, "role": "hr", "user_id": str(user_id),
-        "model": CHAT_MODEL,
-    })
+    response = post_chat(client, token, {"message": PROPERTY_QUESTION, "model": CHAT_MODEL})
     print(f"  status={response.status_code}")
     if response.status_code != 200:
         print(f"  {response.text}")
@@ -168,21 +164,21 @@ def case_hr_property_listings_denied(client: TestClient, user_id: UUID) -> bool:
     print(f"  X-Conversation-Id موجود: {bool(conversation_id)}")
     if not conversation_id:
         return False
-    messages = stored_messages(client, conversation_id, user_id)
+    messages = stored_messages(client, conversation_id, token)
     print(f"  الرسايل المحفوظة: {[m['role'] for m in messages]}")
     return (
         [m["role"] for m in messages] == ["user", "assistant"]
         and messages[1]["content"] == denial_message
         and messages[1]["sources"] == []
-        and conversation_id in conversation_ids(client, user_id)
+        and conversation_id in conversation_ids(client, token)
     )
 
 
-def case_paid_model_rejected_before_any_write(client: TestClient, user_id: UUID) -> bool:
+def case_paid_model_rejected_before_any_write(client: TestClient, token: str) -> bool:
     """موديل مدفوع → 422 قبل ما أي محادثة تتعمل (ماينفعش يتحاسب على الـAPI key بتاعنا)."""
-    before = conversation_ids(client, user_id)
-    response = post_chat(client, {**sales_payment_body(user_id), "model": PAID_MODEL})
-    after = conversation_ids(client, user_id)
+    before = conversation_ids(client, token)
+    response = post_chat(client, token, {**payment_body(), "model": PAID_MODEL})
+    after = conversation_ids(client, token)
     print(f"  status={response.status_code} | عدد المحادثات قبل/بعد: {len(before)}/{len(after)}")
     return response.status_code == 422 and before == after
 
@@ -196,16 +192,17 @@ def delete_created_conversations() -> None:
             )
 
 
-def run_cases(client: TestClient, user_ids: dict[str, UUID]) -> int:
+def run_cases(client: TestClient, tokens: dict[str, str]) -> int:
     """يرجّع عدد الحالات اللي فشلت."""
     cases: list[tuple[str, Callable[[], bool]]] = [
         ("GET /models (متوقع: فيه الموديل المجاني)", lambda: case_models_lists_chat_model(client)),
+        ("/chat و/conversations بدون Authorization (متوقع: 401)", lambda: case_unauthenticated_rejected(client)),
         ("sales → /chat payment_policies (متوقع: stream + حفظ)",
-         lambda: case_sales_chat_streams_and_persists(client, user_ids["sales"])),
+         lambda: case_sales_chat_streams_and_persists(client, tokens["sales"])),
         ("hr → /chat (الـagent يوجّه سؤال الوحدات لـproperty_listings) (متوقع: denied + حفظ الرفض)",
-         lambda: case_hr_property_listings_denied(client, user_ids["hr"])),
+         lambda: case_hr_property_listings_denied(client, tokens["hr"])),
         ("sales → /chat بموديل مدفوع (متوقع: 422)",
-         lambda: case_paid_model_rejected_before_any_write(client, user_ids["sales"])),
+         lambda: case_paid_model_rejected_before_any_write(client, tokens["sales"])),
     ]
     failed = 0
     for title, case in cases:
@@ -221,9 +218,13 @@ def main() -> None:
     # على Windows، لما الـoutput يتعمله redirect/pipe بيبقى cp1252 وبيقع مع العربي.
     sys.stdout.reconfigure(encoding="utf-8")
     load_dotenv()
-    user_ids = {role: find_user_id(role) for role in ("sales", "hr")}
-    if problems := missing_preconditions(user_ids):
+    if problems := missing_preconditions():
         print("المتطلبات مش جاهزة:\n" + "\n".join(f"  - {p}" for p in problems))
+        sys.exit(2)
+    try:
+        tokens = login_all(("sales", "hr"))
+    except RuntimeError as exc:
+        print("المتطلبات مش جاهزة:\n  - " + str(exc))
         sys.exit(2)
 
     # import هنا مش فوق: app.main بيعمل fail fast لو OPENROUTER_API_KEY ناقص،
@@ -235,7 +236,7 @@ def main() -> None:
     # بياخد loop جديد، والاتصال من الـloop المقفول بيقع بـ"Event loop is closed".
     with TestClient(app) as client:
         try:
-            failed = run_cases(client, user_ids)
+            failed = run_cases(client, tokens)
         finally:
             delete_created_conversations()
     sys.exit(1 if failed else 0)

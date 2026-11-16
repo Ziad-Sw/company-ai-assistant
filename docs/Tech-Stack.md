@@ -12,6 +12,7 @@
 | **TypeScript** | إلزامي لكل الكود |
 | **Tailwind CSS** | الـstyling الأساسي، مبني على التوكنز في `Design-System.md` |
 | **Zustand** | state management — `authStore` (role, user, token)، `chatStore` (active conversation, streaming buffer) |
+| **@supabase/supabase-js** | الـlogin (signInWithPassword) + إدارة الجلسة (persist + silent refresh + onAuthStateChange) |
 | **next-intl** | دعم اللغتين عربي/إنجليزي |
 | **SSE / Fetch Streaming** | لعرض رد الـAI بشكل streaming زي ChatGPT/Claude |
 
@@ -28,9 +29,10 @@
 | **python-dotenv** | قراءة الـsecrets من `.env` (مش من ملفات تتترفع على GitHub) |
 
 **Endpoints الأساسية:**
-- `POST /chat` — streaming، بيعدي على الـLangGraph agent
-- `GET /conversations` — تاريخ محادثات الموظف الحالي
-- `GET /models` — قائمة الموديلات المجانية المتاحة من OpenRouter (ديناميكي)
+- `POST /chat` — streaming، بيعدي على الـLangGraph agent (**محمية** — `Authorization: Bearer` إلزامي، الـuser_id/الـrole بيتقروا من الـJWT على السيرفر)
+- `GET /conversations` — تاريخ محادثات الموظف الحالي (**محمية**، ownership من الـtoken)
+- `GET /me` — هوية الموظف من الجلسة المتحقق منها (`{user_id, role, full_name}`) — **محمية**
+- `GET /models` — قائمة الموديلات المجانية المتاحة من OpenRouter (ديناميكي) — **عمداً عامة** (القرار 4 في قسم 6)، مافيش أي حاجة حساسة فيها
 - `GET /admin/documents` — قائمة كل المستندات، مع فلترة بالـcategory والبحث بالاسم
 - `POST /admin/documents` — رفع مستند جديد (Admin فقط)
 - `PATCH /admin/documents/{id}` — تعديل category / تعطيل (Inactive) / تفعيل
@@ -39,6 +41,8 @@
 - `DELETE /admin/documents/{id}` — حذف نهائي
 - `GET /admin/documents/{id}/audit` — سجل من عدّل/رفع/حذف وإمتى
 - `POST /admin/employees` — إنشاء حساب موظف جديد (Admin فقط)، بيولّد إيميل + password مؤقت
+
+(الـendpoints الإدارية لسه هتتبني في Phase 3 — هتتحمى بـ`require_admin` في `app/auth/dependencies.py`.)
 
 ## 3. Database & Vector Store
 
@@ -50,7 +54,7 @@
 
 | الجدول | المحتوى |
 |---|---|
-| `profiles` | user_id، role (sales/hr/admin)، full_name، email |
+| `profiles` | id (PK متطابق مع `auth.users.id` — مش عمود user_id)، role (sales/hr/admin)، full_name، created_at — الإيميل في `auth.users` مش هنا (schema.sql الفعلي هو المرجع) |
 | `conversations` | id، user_id، title، created_at |
 | `messages` | id، conversation_id، role (user/assistant)، content، created_at |
 | `documents` | id، title، category، access roles المسموحة، version، status (Active/Inactive/Processing/Failed)، uploaded_by، created_at |
@@ -96,11 +100,31 @@
 
 ## 6. Authentication & Roles
 
-- **Supabase Auth** — JWT-based
-- **مفيش Sign-up عام** — الموظف ميعملش حساب لنفسه
-- **Admin بس يقدر يضيف موظفين**: يكتب الاسم + الـrole، النظام يولّد الإيميل تلقائي (`الاسم@reelestate.demo` — دومين وهمي، مش gmail.com) وpassword مؤقت، بيتعرض مرة واحدة بس بعد الإنشاء
-- **3 حسابات Demo جاهزة** (seeded من Phase 0): Sales، HR، Admin — موثّقة في `docs/demo-accounts.md`
-- **الأدوار:** `sales`، `hr`، `admin` — متخزنة في جدول `profiles`، وبتتحط في الـLangGraph state من أول خطوة (structured state، مش نص في الـprompt)
+**Supabase Auth** — JWT-based، مفيش Sign-up عام — الموظف ميعملش حساب لنفسه. **Admin بس يقدر يضيف موظفين**: يكتب الاسم + الـrole، النظام يولّد الإيميل تلقائي (`الاسم@reelestate.demo` — دومين وهمي، مش gmail.com) وpassword مؤقت، بيتعرض مرة واحدة بس بعد الإنشاء. **3 حسابات Demo جاهزة** (seeded من Phase 0): Sales، HR، Admin — موثّقة في `docs/demo-accounts.md`.
+
+### الفلو (منفّذ فعلاً)
+
+```
+الموظف → /login → Supabase Auth (signInWithPassword) → access_token (JWT) في localStorage
+       → أي نداء API بـ Authorization: Bearer <token>
+       → الـbackend بيتحقق من الـJWT (signature + exp + aud + iss) → user_id من claim الـsub
+       → الـrole وfull_name من جدول profiles على السيرفر
+```
+
+### القرارات الخمسة المعتمدة (والـtrade-offs بتاعتهم)
+
+1. **التحقق من الـJWT: JWKS الأول + fallback لـHS256** (`app/auth/verification.py`). المفاتيح العامة من `<SUPABASE_URL>/auth/v1/.well-known/jwks.json` (PyJWKClient مع cache). لو الـJWKS مش متاح (شبكة) أو الـtoken موقّع بالمفتاح السيمتريك القديم، بنرجع للتحقق بـHS256 على `SUPABASE_JWT_SECRET` (اختياري في `.env`). **لماذا الـfallback مش ثغرة:** الـHS256 verification بيفشل على أي token مش موقّع فعلاً بالسر الصحيح، فمافيش مسار مفتوح للتزوير. `aud != "authenticated"` مرفوض في المسارين (PyJWT بيفشل فوراً).
+2. **الـrole مش بيتوثق أبداً من الـtoken ولا من أي input خارجي** — بيتقري دايماً من `profiles` على السيرفر (`app/auth/dependencies.py`). الـ`sub` الموقّع بس هو اللي بيتاخد من الـJWT. حتى لو موظف عدّل الـrole في نسخة token منتهية، الـbackend هيرجع 403/401 حسب جدول profiles.
+3. **RLS طبقة ثانوية، مش الحماية الرئيسية** — اتصال الـbackend بـPostgres (user `postgres`، owner الجداول) **بيتخطى RLS بالتصميم** (مطلوب للـembedding writes وschema ops). الحماية الفعلية = كود الـapp: `get_current_user`/`require_admin` + ownership checks في كل endpoint + الفحص deterministic جوه الـgraph. الـRLS policies (migrations/002_rls_policies.sql) موجودة عشان تحمي من الوصول المباشر بالـanon key (مثلاً Supabase REST العريان) — والـnegative control اتعمل: الـanon key مرفوض على كل الجداول.
+4. **`GET /models` عامة عمداً** — مافيش فيها أي بيانات حساسة، وبتُستخدم قبل الـlogin أصلاً (ممكن المستخدم يشوف الموديلات في صفحة الدخول لما الـdropdown يتبني).
+5. **Silent token refresh + redirect-on-401 في الـfrontend** (`lib/api/client.ts`): الـaccess token بيتجدد صامت لو قرب يخلص قبل أي نداء؛ لو الـrefresh فشل أو الـbackend رجّع 401 → مسح الجلسة (`authStore` + `signOut`) والتحويل لـ`/<locale>/login`. الـauthStore (Zustand + persist) **للعرض بس** — التفويض النهائي دايماً 401/403 من الـbackend.
+
+### نطاق متعمد خارج المرحلة دي
+
+- **Rate limiting** على الـbackend متأجل قرار (مذكور في الـspec الأصلي كملاحظة، مش متنفّذ).
+- `RequireAuth`/`RequireAdmin` في الـfrontend حماية **عرض بس** (منع وميض المحتوى) — مش بديل عن التحقق على السيرفر.
+
+**الأدوار:** `sales`، `hr`، `admin` — متخزنة في جدول `profiles`، وبتتحط في الـLangGraph state من أول خطوة (structured state، مش نص في الـprompt). مصفوفة الصلاحيات في قسم 3 (3 Categories).
 
 ## 7. Evaluation & Observability
 
@@ -185,7 +209,7 @@ company-ai-assistant/
 
 ## 11. Environment & Secrets
 
-- `.env` — للـsecrets الحقيقية فقط (OpenRouter API key، Gemini API key، Supabase keys) — **لا يترفع على GitHub** (في `.gitignore`)
+- `.env` — للـsecrets الحقيقية فقط (OpenRouter API key، Gemini API key، Supabase keys، و`SUPABASE_JWT_SECRET` الاختياري للـfallback) — **لا يترفع على GitHub** (في `.gitignore`)
 - `docs/demo-accounts.md` — حسابات الـdemo الوهمية (إيميلات/باسوردز مش حقيقية) — ممكن تترفع عادي، مش secret
 
 ## 12. Progress Tracking

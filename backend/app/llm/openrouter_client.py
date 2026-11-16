@@ -19,8 +19,10 @@ _MODELS_TIMEOUT_SECONDS = 15
 _MODELS_CACHE_TTL_SECONDS = 300
 _models_cache: tuple[float, list[dict]] | None = None
 # سقف لطول الرد: موديل مجاني داخل في loop مايفضلش ماسك الـconnection والـworker من غير نهاية.
-# عالي بما يكفي لموديلات الـreasoning (الـreasoning tokens بتتحسب من نفس الحد).
-_MAX_OUTPUT_TOKENS = 2048
+# 2048 كانت بتتفصّد بالكامل في reasoning tokens على الموديلات الـreasoning
+# (المقاس فعلياً على nemotron في scripts/diagnose_empty_responses.py:
+# reasoning=2048 وcontent=0 مع finish_reason=length) — 4096 بيسيب مساحة للـcontent.
+_MAX_OUTPUT_TOKENS = 4096
 # رد الـcategory decision قصير (token واحد)، بس الـreasoning بتاع الموديلات
 # المجانية بيتحسب من نفس الحد — 512 كانت بتتنافس والـcontent بييجي فاضي مع
 # finish_reason=stop (اتقاست فعلياً على nemotron في اختبارات الـrouting)،
