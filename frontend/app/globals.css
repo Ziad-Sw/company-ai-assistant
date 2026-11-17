@@ -1,8 +1,14 @@
 @import "tailwindcss";
 
 /*
+ * الوضع الداكن بالكلاس (Design-System §5: toggle يدوي في localStorage) —
+ * عشان الـdark: variant يتبع الكلاس مش prefers-color-scheme.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
  * توكنز الـDesign-System.md (Modern Slate Blue) — قيم light كافتراضي
- * وقيم dark عبر prefers-color-scheme (الـtoggle اليدوي لما يتبني).
+ * وقيم dark على الكلاس .dark اللي السكريبت الـinline بيحطه قبل أول paint.
  */
 :root {
   color-scheme: light;
@@ -32,28 +38,26 @@
   --brand-radius-full: 999px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --brand-primary: #4d8fd6;
-    --brand-primary-hover: #6ba3e0;
-    --brand-primary-subtle: #1a2a3d;
-    --brand-bg-page: #13181f;
-    --brand-bg-surface: #1b212b;
-    --brand-bg-sidebar: #10151c;
-    --brand-bg-input: #1f2630;
-    --brand-text-primary: #f2f4f7;
-    --brand-text-secondary: #9aa4b2;
-    --brand-text-on-primary: #ffffff;
-    --brand-border: #262d38;
-    --brand-border-strong: #38424f;
-    --brand-success: #3fbe82;
-    --brand-success-subtle: #163626;
-    --brand-warning: #d9a23e;
-    --brand-warning-subtle: #352a14;
-    --brand-error: #e35b4c;
-    --brand-error-subtle: #3a1917;
-  }
+html.dark {
+  color-scheme: dark;
+  --brand-primary: #4d8fd6;
+  --brand-primary-hover: #6ba3e0;
+  --brand-primary-subtle: #1a2a3d;
+  --brand-bg-page: #13181f;
+  --brand-bg-surface: #1b212b;
+  --brand-bg-sidebar: #10151c;
+  --brand-bg-input: #1f2630;
+  --brand-text-primary: #f2f4f7;
+  --brand-text-secondary: #9aa4b2;
+  --brand-text-on-primary: #ffffff;
+  --brand-border: #262d38;
+  --brand-border-strong: #38424f;
+  --brand-success: #3fbe82;
+  --brand-success-subtle: #163626;
+  --brand-warning: #d9a23e;
+  --brand-warning-subtle: #352a14;
+  --brand-error: #e35b4c;
+  --brand-error-subtle: #3a1917;
 }
 
 @theme inline {

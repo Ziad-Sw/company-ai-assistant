@@ -1,4 +1,8 @@
 {
+  "common": {
+    "switchLanguage": "Switch language",
+    "toggleTheme": "Switch theme"
+  },
   "auth": {
     "title": "Sign in",
     "subtitle": "With your Reel Estate account",
@@ -15,9 +19,49 @@
     }
   },
   "chat": {
-    "placeholderTitle": "Chat is coming in a later phase",
-    "placeholderBody": "Sign-in works — messages and answers will appear here once the chat UI is built.",
     "signOut": "Sign out",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "messagesLabel": "Conversation messages",
+    "newChatTitle": "Start a new conversation",
+    "newChatBody": "Ask a question about properties, payment plans, or general company info — answers come from the company knowledge base with their sources.",
+    "inputPlaceholder": "Type your question…",
+    "inputLabel": "Your question",
+    "send": "Send",
+    "sidebar": {
+      "newChat": "New chat",
+      "untitled": "Untitled conversation",
+      "empty": "No conversations yet — your chats will appear here.",
+      "listLabel": "Conversations",
+      "loadingConversations": "Loading conversations…",
+      "loadFailed": "Couldn't load your conversations. Try again in a moment.",
+      "openMenu": "Open menu",
+      "collapseSidebar": "Collapse sidebar",
+      "showSidebar": "Show sidebar"
+    },
+    "model": {
+      "label": "Model",
+      "placeholder": "Select a model…",
+      "loadingModels": "Loading models…",
+      "loadFailed": "Couldn't load the available models. Try again in a moment.",
+      "noneAvailable": "No models are available right now — try again later.",
+      "contextLength": "{count, plural, one {context: # token} other {context: # tokens}}"
+    },
+    "notices": {
+      "modelUnavailable": "The model you selected is no longer available — we picked the first available one. You can choose another from the list.",
+      "sendFailed": "No answer came back — check your connection and try again."
+    },
+    "denied": {
+      "title": "Not allowed for your role"
+    },
+    "sources": {
+      "label": "Sources",
+      "sourceTitle": "{title} — version {version}"
+    },
+    "errors": {
+      "model": "The model failed to answer — try sending the question again.",
+      "conversationNotFound": "This conversation doesn't exist or isn't yours.",
+      "conversationLoadFailed": "Couldn't load this conversation. Try again in a moment.",
+      "backToChat": "Back to new chat"
+    }
   }
 }

@@ -23,7 +23,7 @@ create table if not exists public.documents (
   version text not null,
   language text not null default 'mixed',
   source_path text,                  -- مسار الملف الأصلي (للمرجعية)
-  status text not null default 'active' check (status in ('active', 'inactive')),
+  status text not null default 'active' check (status in ('active', 'inactive', 'processing', 'failed')),
   uploaded_by uuid references public.profiles(id),
   updated_at timestamptz not null default now(),
   created_at timestamptz not null default now()
@@ -79,5 +79,22 @@ create table if not exists public.eval_runs (
   created_at timestamptz not null default now()
 );
 
--- ملحوظة: Row Level Security (RLS) للصلاحيات حسب الدور هتتضاف في خطوة لاحقة
--- بعد ما نبني الـauth flow، مش جزء من الـschema الأساسي ده.
+-- 8) جدول audit_logs — سجل عمليات الـadmin (مين عمل إيه وإمتى — migrations/003)
+-- الـtarget_id من غير foreign key عمداً: سجل الحذف يفضل موجود بعد تمسح صف المستند.
+create table if not exists public.audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  actor_id uuid references public.profiles(id),
+  action text not null check (action in (
+    'upload', 'edit', 'replace', 'deactivate', 'activate',
+    'delete', 'reprocess', 'add_employee'
+  )),
+  target_type text not null check (target_type in ('document', 'employee')),
+  target_id uuid not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_audit_logs_target on public.audit_logs(target_type, target_id);
+create index if not exists idx_audit_logs_created_at on public.audit_logs(created_at desc);
+
+-- ملحوظة: Row Level Security (RLS) للصلاحيات حسب الدور في migrations/002 (طبقة ثانوية —
+-- الحماية الفعلية في كود التطبيق)، وحالات documents الموسّعة (processing/failed) في 003.

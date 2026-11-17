@@ -4,6 +4,147 @@
 
 ---
 
+## [2026-11-16] — متابعات الـsidebar: نقل تفضيلات الموظف (theme + language) لأسفل الـpanel (مراجعة المستخدم)
+
+**تم:**
+- **المشكلة:** التبويبات الجديدة (theme/language) اتحطت جنب الهوية في هيدر الـsidebar — الاسم بيتقص ("Admin Dem…") عشان يفضل مكان للزرارين، وصف واحد بيحمل 4 عناصر مختلفة الوظيفة (هوية + لغة + مظهر + طي).
+- **الترتيب الجديد (نمط Gemini/Claude):** الهيدر رجع للهوية بس (الاسم + الـrole بعرضهم كامل + زرار الطي)، والتفضيلات نزلت في **صف فوق زرار تسجيل الخروج** — عنقود "هوية/تفضيلات" المعروف في أسفل الـsidebar. صف `grid grid-cols-2 gap-2` (بيتقلب صح في الـRTL تلقائياً).
+- **التبويبات اتبنت على `Button` المشترك** (variant `secondary` size `sm`) بدل classes يدوية — مطابقة إلزامية للـDesign-System §4 (أي زرار يتسحب من ui/Button)، وشكلها بقى متسق مع زرار "+ New chat" الـsecondary. في صفحة الدخول فضلوا chip في الركن بنفس الستايل.
+
+**ملفات اتعدلت:**
+- components/shared/Sidebar.tsx — الهيدر رجع للهوية + الطي، صف التفضيلات في الفوتر فوق تسجيل الخروج
+- components/shared/ThemeToggle.tsx، components/shared/LanguageSwitcher.tsx — رندر على ui/Button (secondary/sm) بدل زرار مخصص بـclasses
+- app/[locale]/(auth)/login/page.tsx — gap-2 بين الـchips
+
+**الحالة:** ✅ تم — lint + types + build عدّوا. التحقق البصري على المستخدم.
+
+---
+
+## [2026-11-16] — عارض الـmarkdown لردود الـAI (إقفال آخر مخرَج من خطة الـUI)
+
+**تم:**
+- `react-markdown@10.1.0` + `remark-gfm@4.0.1` (المكتبتان الوحيدتان الجديدتان في الـfrontend) — عارض `MarkdownContent` في `features/chat/components/` (feature-local حسب قسم 9) بيحوّل رد الـAI لعناصر React بمطابقة توكنز الـDesign-System: فقرات/lists بـ`text-base leading-6` وmarkers بـ`text-muted`، headings بـ`font-semibold`، كود بـ`bg-input` + `overflow-x-auto`، جداول GFM بحدود `border` و`text-start` (RTL-safe)، blockquote بـ`border-s`، links بـ`text-primary` + `hover:text-primary-hover`.
+- **الدمج في `MessageBubble` لردود الـAI بس** — رسالة الموظف فضلت نص عادي (`whitespace-pre-wrap`)، و`denied`/`error` زي ما هما. الـstreaming بيشتغل معاه (إعادة parse لكل token — النصوص محدودة بـ`max_tokens=2048`).
+- **الأمن (LLM05):** الحماية بالبناء مش بالتنظيف بعد الحدوث — react-markdown بيرندر لعناصر React من غير أي `innerHTML`، الـHTML الخام بيتم تجاهله افتراضياً (مفيش `rehype-raw`)، والـURL transform الافتراضي بيحذف `javascript:` والخطيرة. **الصور ممنوعة عمداً** (`img: () => null`) — مفيش حاجة تفتش URLs من متصفح الموظف (tracking/SSRF من جهة العميل) لأن رد الموديل untrusted. الـlinks الخارجة بـ`target="_blank"` + `rel="noopener noreferrer"`. DOMPurify مش محتاج أصلاً لأن مفيش HTML sink.
+
+**ملفات اتعملت/اتعدلت:**
+- frontend/features/chat/components/MarkdownContent.tsx — جديدة
+- frontend/features/chat/components/MessageBubble.tsx — استبدال `<p whitespace-pre-wrap>` بـ`<MarkdownContent>` لردود الـAI
+- frontend/package.json — `react-markdown` + `remark-gfm`
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- الـheadings h1/h2 من الـmarkdown بتترندر h3 جوه الفقاعة عشان ماتضربش hierarchy الصفحة (عملياً الردود الـgrounded نادراً فيها headings — الـprompt بيطلب prose + citations).
+- `npm audit` فيه 7 moderate — كلها **موجودة قبل كده** في dev toolchain (`typescript-eslint` → `minimatch`)، مش من المكتبتين الجداد، وdev-only. اتحست ومتصلحتش (برا نطاق المهمة).
+- skill passes: **llm-security (LLM05)** وقت الكتابة (السلوك الافتراضي الآمن اتأكد منه من الـpackage نفسه مش من الذاكرة) ← Clean Code Guard (اتصلح: join يدوي للـclasses اتبدل بـ`cn()` المشروع) ← Web Design Guidelines قبل التسليم.
+
+**الحالة:** ✅ تم statically (lint + types + build). التحقق البصري على رد حقيقي في المتصفح على المستخدم (نفس blocker البيئة الموثق تحت).
+
+---
+
+## [2026-11-16] — الوضع الداكن اليدوي (toggle مخزن في localStorage — الخيار المسموح في Design-System §5)
+
+**تم:**
+- **التبديل بقى class-based:** `globals.css` — بلوك `@media (prefers-color-scheme: dark)` اتبدل بـ`html.dark { ... }` بنفس قيم التوكنز بالظبط، و`@custom-variant dark` اتضاف عشان الـ`dark:` utilities تتبع الكلاس مش تفضيل النظام. مفيش أي component اتعدل (كلهم بيستهلكوا التوكنز).
+- **سكريبت inline قبل أول paint** في `<head>` بتاع layout الـ`[locale]` — النمط الرسمي من دليل Next 16 (`preventing-flash-before-hydration.md`): بيقرا `localStorage` وإلا `prefers-color-scheme`، مع `suppressHydrationWarning` على `<html>`. **تفضيل النظام هو الـdefault** لما مفيش قيمة مخزنة — يعني بدون تدخل يدوي السلوك زي زمان بالظبط.
+- **`ThemeToggle` في `components/shared`**: بيبدّل الكلاس على `<html>` ويحفظ في `localStorage["theme"]`، وأيقونة Sun/Moon جديدين في `components/ui/icons.tsx`. المكانين زي الـlanguage switcher: identity row في الـsidebar + ركن صفحة الدخول.
+- **مزامنة الـstate مع الـDOM بـ`useSyncExternalStore`** — الـstore الخارجي هو كلاس `html.dark` والاشتراك بـ`MutationObserver` (attributeFilter: class). مفيش نسخة تانية من الحالة، ومفيش `setState` جوه effects.
+
+**ملفات اتعملت/اتعدلت:**
+- frontend/app/globals.css — class-based dark + `@custom-variant`
+- frontend/app/[locale]/layout.tsx — سكريبت الـtheme الـinline + `suppressHydrationWarning`
+- frontend/components/shared/ThemeToggle.tsx — جديدة
+- frontend/components/ui/icons.tsx — SunIcon/MoonIcon
+- frontend/components/shared/Sidebar.tsx، app/[locale]/(auth)/login/page.tsx — المواضع
+- frontend/messages/{en,ar}.json — `common.toggleTheme` ("Switch theme" / "تبديل المظهر")
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- قاعدة الـlint الجديدة `react-hooks/set-state-in-effect` رفضت أول نسخة (setState جوه effect) — **الحل هيكلي مش تعطيل القاعدة**: `useSyncExternalStore`. الـdev Strict Mode remount (اللي بيمسح الكلاس من `<html>`) اتعالج بـ`useLayoutEffect` بيعيد التطبيق — no-op في الإنتاج (موصى به رسمياً في دليل Next).
+- **تكرار مقصود وموثق:** منطق اشتقاق الـtheme موجود مرتين — جوه السكريبت الـinline (لازم vanilla self-contained) وفي `resolveStoredTheme()` — cross-referenced بتعليقات في الطرفين عشان يفضلوا متطابقين.
+- `theme-color` في الـviewport فضل media-based — المتصفح بيقراه قبل الـpaint ومفيش طريقة class-driven من غير JS إضافي.
+- skill passes: Code Security وقت الكتابة (localStorage للتفضيل بس — مش بيانات حساسة، مفيش أسرار) ← Clean Code Guard ← UX Writing ← Web Design Guidelines (`color-scheme: dark` على `html.dark` يصلح scrollbars/inputs، aria-pressed للحالة، hydration-safe).
+
+**الحالة:** ✅ تم statically (lint + types + build). التحقق البصري (light/dark × en/ar × موبايل) على المستخدم.
+
+---
+
+## [2026-11-16] — مبدّل اللغة en/ar (إقفال مكوّن `LanguageSwitcher` من قسم 9)
+
+**تم:**
+- **`components/shared/LanguageSwitcher.tsx`** — زرار بيبدّل بادئة الـlocale في المسار الحالي بنفس الصفحة، بـ`router.replace` مش `push` (زرار الرجوع مايرجعش لنفس الصفحة بلغة تانية). الـlabel الظاهر هو **اسم اللغة الهدف بلغتها هي** ("English" / "العربية" — مع `translate="no"` عشان الترجمة الآلية ماتبوّظهاش)، والـaria-label مترجم (`common.switchLanguage`).
+- **`i18n/navigation.ts`** — `createNavigation(routing)` بـexports الـusePathname/useRouter المستخدمين فعلاً بس (الـusePathname بيرجّع المسار من غير البادئة والـrouter بيحطها حسب الـlocale المطلوب).
+- **الموضعان:** ركن ثابت `end-4 top-4` في صفحة الدخول (مفيش sidebar فيها واختيار اللغة أهم قبل الدخول)، وidentity row في الـsidebar جنب زرار الطي (متاح في الـdrawer على الموبايل برضه). الـ`dir` والخط بيتقلبوا تلقائي من layout الـ`[locale]`.
+
+**ملفات اتعملت/اتعدلت:**
+- frontend/i18n/navigation.ts — جديدة
+- frontend/components/shared/LanguageSwitcher.tsx — جديدة
+- frontend/components/shared/Sidebar.tsx، app/[locale]/(auth)/login/page.tsx — المواضع
+- frontend/messages/{en,ar}.json — `common.switchLanguage`
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- مفيش حفظ إضافي للـlocale — **الـURL نفسه هو مصدر الحقيقة** (deep-linkable)، والـlocale الحالي بيتحدد من المسار.
+- مفيش `useSearchParams` — مفيش route في المشروع بستخدم query params حالياً، وتحيدها كان هيفتاح مشكلة Suspense في الـstatic rendering (YAGNI).
+- skill passes: Code Security (المسار الهدف من pathname داخلي بس — مفيش open redirect) ← Frontend Design وقت الكتابة (بناء على نمط icon-button الموجود في الـidentity row) ← Clean Code Guard ← UX Writing ← Web Design Guidelines.
+
+**الحالة:** ✅ تم statically (lint + types + build). التحقق البصري على المستخدم.
+
+---
+
+## [2026-11-16] — المرحلة: واجهة الشات الأساسية (شات + sidebar + dropdown الموديلات) — إقفال آخر مخرَج من Phase 1
+
+**تم:**
+- **صفحة الشات الكاملة** (`/[locale]/chat`) بديل الـplaceholder: قايمة رسايل بفقاعات حسب الـDesign-System (رسالة الموظف `primary` على الـinline-end وبتتقلب تلقائياً في الـRTL، رد الـAI `bg-surface` بحدود)، مؤشر 3 نقط أثناء انتظار أول token، والرد بيتعرض نص عادي (ممنوع `dangerouslySetInnerHTML` — مخاطرة LLM05 المسجلة). المصادر بتظهر badges صغيرة (اسم المستند + الإصدار) بعد الـ`done`.
+- **بروتوكول الـSSE كله مدعوم:** `token`/`done`/`denied`/`error` — الـ`denied` بيعرض مكوّن رفض الصلاحية (أيقونة قفل + `error-subtle`) بالنص بتاع الـbackend حرفياً، والـ`error` ملاحظة خطأ جوه الفقاعة مع الحفاظ على أي tokens جزئية. المحادثة الجديدة بترجع `X-Conversation-Id` والـURL بيتحدّث فوراً لـ`/chat/{id}` (بدون مسح المحتوى اللي قدام المستخدم).
+- **sidebar المشترك** (`components/shared/Sidebar.tsx` حسب Tech-Stack قسم 9): ثابت 280px على الديسكتوب وdrawer بـoverlay على الموبايل، زرار "+ New Chat" ثابت فوق، هوية الموظف (الاسم + الـrole من الـauthStore للعرض) + تسجيل خروج، والـpositioning منطقي (`start`) فبيتقلب صح في الـRTL.
+- **تاريخ المحادثات:** قايمة المحادثات (الأحدث الأول من GET /conversations) مع المحادثة النشطة بـ`primary-subtle`، empty state وloading وerror لكل حالة، وrefetch عند إضافة محادثة جديدة (عداد `conversationsVersion` في الـchatStore بدل polling). صفحة `/chat/[conversationId]` بتجيب الـhistory من GET /conversations/{id} وبتكمّل رسايل live بنفس الـflow — و404 (مش موجودة/مش بتاعته) بيطلع رسالة وزرار رجوع.
+- **اختيار الموديل (PRD 10.4):** generic `Dropdown` في `components/ui` (كيبورد كامل: أسهم/Enter/Escape/نقر بره، `listbox`/`option` + `aria-activedescendant`، علامة ✓ للمختار) و`ModelDropdown` بيغذي منه من GET /models. الموديل اللي اختفى من المجانية: الـ422 من /chat بيرجّع القايمة وينقّي أول متاح تلقائياً مع تنبيه واضح فوق شريط الإدخال والمسودة محفوظة. فشل جلب القايمة أو قايمة فاضية ليهم empty states (إلزامي في الـDesign-System).
+- **المدخلات:** `ChatInput` بـtextarea بتكبر، Enter يبعت (مع احترام الـIME العربي)، Shift+Enter سطر جديد، وسقف 4000 حرف مطابق للـbackend. فشل الإرسال قبل الـstream (422/500/شبكة) بيشيل الـplaceholder الفاضي وبيعرض تنبيه — المسودة بتفضل موجودة.
+- **الكوبي:** كل النصوص الجديدة في `messages/en.json` و`ar.json` (empty states/errors/loading بـellipsis) — والـplaceholder strings اتشالت مع المكوّن بتاعها.
+
+**ملفات اتعملت/اتعدلت:**
+- frontend/features/chat/api/chat.ts، features/chat/api/models.ts، features/conversations/api/conversations.ts — طبقة الـAPI (SSE client مبني على apiFetch الموجود بكل حاجته: Bearer + silent refresh + redirect-on-401، مع AbortController)
+- frontend/store/chatStore.ts — جديدة (محادثة نشطة + موديل مختار + عداد الـconversations؛ عرض بس زي الـauthStore)
+- frontend/features/chat/hooks/useChat.ts، features/chat/hooks/useModels.ts — دورة حياة المحادثة وحالة الموديلات
+- frontend/features/chat/components/{MessageBubble، PermissionDeniedMessage، MessageList، ChatInput، ChatComposer، ModelDropdown}.tsx — الجديدة
+- frontend/features/chat/types.ts، frontend/features/conversations/components/{ConversationList، ConversationItem}.tsx — الجديدة
+- frontend/components/ui/Dropdown.tsx، frontend/components/shared/Sidebar.tsx — الجديدة (مشتركين حسب قسم 9)
+- frontend/app/[locale]/(chat)/layout.tsx — جديدة (الهيكل: sidebar + header موبايل)
+- frontend/app/[locale]/(chat)/chat/page.tsx — إعادة كتابة (بديل الـplaceholder)
+- frontend/app/[locale]/(chat)/chat/[conversationId]/page.tsx — جديدة
+- frontend/features/auth/components/ChatPlaceholder.tsx — اتمسحت
+- frontend/messages/{en،ar}.json — نصوص الشات الجديدة
+- docs/PROGRESS.md — الـentry ده
+
+**skill passes (ترتيب قسم 10):** Code Security وقت الكتابة (كل النداءات عبر apiFetch، رد الموديل نص فقط، المصادر عرض من داتا الـbackend، الـevents بتتفحص ضد allowlist، مفيش أسرار في الـclient) ← Clean Code Guard بعد كل ملف (اتصلح: `locale` راجعة من useChat بدون استخدام اتشالت، الـcomposer المشترك `ChatComposer` بدل تكرار في الصفحتين، ModelDropdown بقت عرضية بعد ما أول نسخة كانت بـcontext provider مكسور الوصول) ← UX Writing على نصوص الرسايل ← Web Design Guidelines قبل التسليم (listbox/aria-activedescendant للـdropdown، role=log + aria-live للرسايل، focus-visible في كل العناصر، aria-expanded للقوائم، RTL بخصائص منطقية، تباين text-muted على bg-sidebar في dark مطابق لملاحظة الـDesign-System). Test Guard مش مطبق — مفيش ملفات اختبار اتكتبت (مفيش infra اختبارات frontend لسه). مفيش تعديل backend خالص.
+
+**اللي اتجرّب فعلاً:** lint + tsc + `next build` كاملين (الـroutes بتاعة /chat و/chat/[conversationId] بتتولد صح)، و`GET /models` live من الـbackend (15 موديل نصي). **مسار الـstream الكامل ماتجرّبش end-to-end من الجلسة دي بسبب blocker بيئي:** أي عملية بتتشغّل من جلسة الأداة دي بتحترم Application Control policy بترفض DLL بتاع psycopg ("An Application Control policy has blocked this file") فأي endpoint بيلمس الداتابيز بيرجع 500 من العمليات المتولدة هنا — مش عيب كود (نفس الـsetup عدّى اختباراته live يوم 2026-11-14 من الترمينال العادي). **التحقق المطلوب من الترمينال العادي:** `uvicorn app.main:app --reload` من backend/ + `npm run dev` من frontend/ + حساب sales من docs/demo-accounts.md: سؤال تقسيط → streaming + مصادر؛ فتح المحادثة من الـsidebar؛ سؤال وحدات بحساب hr → رسالة رفض؛ عربي/RTL + dark mode + موبايل. (اختياري بالـquota: تجربة 422 بتاع اختفاء الموديل.)
+
+**ملاحظات/قرارات اتاخدت أثناء التنفيذ:**
+- **الرد بيتعرض نص عادي مش markdown** — قرار مقصود (نطاق المرحلة): الـgrounded prompt بيرجّع نص مع citations، وعمل markdown renderer آمن (sanitize) مرحلة صغيرة منفصلة لو اتحتاجت. ممنوع `dangerouslySetInnerHTML` (LLM05).
+- **بعد أول رد في محادثة جديدة الـURL بيتعمله `router.replace` لـ/chat/{id}** — الصفحة بتعمل remount وتجيب الـhistory من الـbackend (مصدر الحقيقة) بدل نقل الـstate. الـpersist حصل قبل الـ`done` فمفيش race.
+- **مصادر الـcitations اللي الموديل ذكرها مش المهمة** — الـbadges بتعرض الـ5 chunks اللي اتبعتت للموديل (نفس اللي محفوظين في messages.sources، الموثق في Phase 1).
+- **الـscroll دايماً لآخر رسالة** على كل تحديث — مفيش "stick to bottom" ذكي (مهمة صغيرة لاحقة لو ضاقت الشاشة).
+- **الـquota:** الجلسة دي مااستهلكتش أي LLM requests (الـ500 حصل قبل أي نداء OpenRouter — فشل import psycopg الأول).
+- ملف pytest لا frontend: اتحسم إن مفيش اختبارات واجهة في المرحلة دي (مفيش runner متسطب) — التحقق lint/tsc/build + E2E يدوي موثق فوق.
+
+**الحالة:** ✅ تم — الواجهة كاملة ومتحقق منها statically (lint + types + build). التشغيل الحي الكامل محتاج خطوة يدوية من الترمينال العادي بسبب blocker بيئي للجلسة (موثق فوق)، ومفيش أي تغيير backend مطلوب.
+
+---
+
+## [2026-11-16] — متابعات واجهة الشات: طي الـsidebar + أيقونات عناصر القايمة (مراجعات المستخدم)
+
+**تم:**
+- **إصلاح حجم الأيقونات:** مكوّن الأيقونات كان بيستبدل `size-4` الافتراضي بأي className إضافي (فالقلم اتوسّع يملأ الزرار). الحجم بقى prop صريح (`sm/md/lg`) مالوش تعارض مع classes الستايل.
+- **طي/فتح الـsidebar (زي Gemini):** زرار دائري بأيقونة panel+سهم جوه هيدر الـsidebar (ديسكتوب بس) بيطيّي الـpanel — ولما يطيّ زرار دائري صغير ثابت فوق-الـstart في منطقة المحتوى بيعيده. الـstate في layout الـ(chat) (`collapsed` للديسكتوب + `drawerOpen` للموبايل)، والظهور بيتحسب بالـclasses بدون JS media queries. الـicon بينعكس بالـRTL (`rtl:-scale-x-100`).
+- **زرار "+ New Chat" بأيقونة +** (بديل القلم بعد المراجعة)، وأيقونة الـlogout بتنعكس RTL برضه.
+- **إزالة أيقونة الـbubble المتكررة من عناصر المحادثات** (كانت noise في كل عنصر) — فضلت بس في empty state بتاع المحادثة الجديدة.
+- تسجيل الخروج اتقبل من المراجعة السابقة: آخر الـpanel كزرار danger أحمر بعرض كامل.
+
+**ملفات اتعدلت:** components/ui/icons.tsx (PlusIcon + PanelToggleIcon بدل PencilIcon، حجم صريح)، components/shared/Sidebar.tsx، app/[locale]/(chat)/layout.tsx، features/conversations/components/ConversationItem.tsx، app/[locale]/(chat)/chat/page.tsx، messages/{en,ar}.json (collapseSidebar/showSidebar).
+
+**الحالة:** ✅ تم — lint + types + build عدّوا. التحقق البصري في المتصفح على المستخدم.
+
+---
+
 ## 2026-11-08 — Prep fixes قبل بناء الـretrieval (ingestion idempotency + requirements)
 
 **تم:**
