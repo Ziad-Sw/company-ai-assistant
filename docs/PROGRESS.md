@@ -4,6 +4,133 @@
 
 ---
 
+## [2026-11-17] — Phase 3 (Frontend): صفحة إدارة الموظفين /admin/employees (Task 5) + مراجعة الأكواد السابقة
+
+**تم (بمهارات Tech-Stack قسم 10: code-security + clean-code-guard + ux-writing + web-design-guidelines):**
+- **`features/admin-employees/` (feature-local):** `types.ts` (EmployeeSummary/Credentials/Roles + نفس pattern إيميل الـbackend للتحقق المبكر)، `api/employees.ts` (GET/POST)، `hooks/useEmployees.ts` (loading مشتق من null + مفيش setState متزامن في effect؛ بعد الإنشاء الناجح بنجيب القايمة من السيرفر تاني — **ممنوع نصنع created_at محلياً**)، والمكونات: `EmployeesScreen` (نفس هيكل المستندات)، `EmployeeTable` (الاسم/الدور/الإيميل بـdir=ltr/تاريخ الإضافة — مفيش أكشنز صفوف في Phase 3 حسب PRD 10.6)، `AddEmployeeModal` (الاسم + الـrole بـDropdown بوصف كل دور + الـemail local-part بتحقق بنفس regex الـbackend — قرار 2026-11-17: مفيش توليد إيميل من الاسم العربي)، `CredentialsModal` (**الكريدنشيالز مرة واحدة** مع تحذير صريح وأزرار نسخ — زرار النسخ مبيعملش «اتنسخ» لو الـclipboard فشل).
+- **الـsidebar:** لينك Admin → Employees (أيقونة UsersIcon جديدة) — Task 6 اكتمل.
+- **كل الـcopy في en + ar** تحت `adminEmployees.*` بصيغة واضحة: أزرار بفعل أولاً، أخطاء what→why→how، إميلي states بقيمة + أول خطوة، تنبيه الكريدنشيالز بصيغة محايدة.
+- **مراجعة الأكواد السابقة (clean-code-guard review) — ملاحظات وصلحات:**
+  - **باج namespace في المودال الجديد:** `roles.*` كانت متلخصة تحت `addModal` والمودال بيقرا بمفاتيح غلط — اتصلحت (و`roleDescriptions` اترفعت جنب `roles` في الملفين).
+  - **`admin_documents.py`:** `_resolve_or_422` كانت بترجّع نص مش مستخدم (YAGNI) — بقت بترجّع ParsedDocument بس؛ `_create_replacement_version` كانت 8 params — بقت 5 بـ`_PreparedUpload` (NamedTuple: بايتات + هوية + اسم الملف) وحذف `old_document_id` المكرر (بيساوي target.id دايماً)؛ إعادة المعالجة بقت بتستخدم `Path(...).stem` مباشرة.
+  - **`extractors.py`:** الـDOCX كان بياخد الفقرات بس — **الجداول كانت بتضيع** (مخططات السداد غالباً جداول!) — اتضاف استخراج الجداول (خلية بخط فاصل، بعد الفقرات). اتختبر موضعياً: فقرات + جدول طلعوا صح، وملف تالف → رسالة عربي واضحة.
+- **التحقق:** compileall + imports green (backend)؛ lint + tsc + build (21 routes، /[locale]/admin/employees متسجلة) green (frontend).
+
+**ملفات اتعملت/اتعدلت:**
+- frontend/features/admin-employees/** — جديدة (types/api/hook/4 مكونات)
+- frontend/app/[locale]/(admin)/admin/employees/page.tsx — جديدة
+- frontend/components/shared/Sidebar.tsx (لينك الموظفين) + ui/icons.tsx (UsersIcon)
+- frontend/messages/en.json + ar.json — adminEmployees.* + common.sidebar.adminEmployees
+- backend/app/api/admin_documents.py + backend/app/rag/extractors.py — وصلحات المراجعة
+
+**الحالة:** ✅ تم (static gates green). **المتبقي:** walkthrough بصري على المستخدم (uvicorn + تسجيل admin → صفحة الموظفين → إضافة موظف → كريدنشيالز → دخول بالموظف الجديد)، وتشغيل `python -m scripts.test_admin_endpoints` لتحقق الـauto-replace.
+
+---
+
+## [2026-11-17] — Phase 3: Auto-replace للصيغ التلقائية + تطبيع أسماء المتصفح
+
+**المشكلة:** رفع ملف PDF محدّث (بلاحقة تحميل متصفح زي « (1)») كان بينزل **مستند جديد منفصل** بدل نسخة لنفس الهوية — نسختين active بيتلمّوا في الـretrieval.
+
+**تم (قرار 2026-11-17 — طلب المستخدم):**
+- **تطبيع الـstem** في `document_from_plain_text`: بلاحقات المتصفح `\s+(\d+)$` بتتشال — «Course (3)» و«Course» نفس الهوية.
+- **Auto-replace في `upload_document`:** لو الهوية التلقائية موجودة بالفعل (أحدث صف بنفس doc_id) → الرفع بيتبع مسار الاستبدال: نسخة جديدة بنفس doc_id، القديمة **inactive** لما المعالجة تنجح، audit `replace` على الصف القديم، والـcategory المختارة في المودال هي اللي بتتنفذ. لو الـtarget processing → 409.
+- **Refactor:** `_create_replacement_version` مشترك بين الاستبدال الصريح (`/replace`) والـauto-replace (نفس الخطوات بالظبط).
+- Markdown مش متأثر (الهوية من الـfrontmatter يدوي — الرفع بنفس doc_id ونسخة جديدة لسه مقصود).
+- **سكريبت الاختبار:** حالة جديدة — رفع `handbook.txt` → 201، ثم رفع `handbook (1).txt` → 201 auto-replace بنفس doc_id + النسختين (واحدة active واحدة inactive).
+- **التحقق الثابت:** compileall + imports green؛ اختبار موضعي للتطبيع («Course (3)» → «Course»). **التشغيلي:** في الترمينال بتاع المستخدم — `python -m scripts.test_admin_endpoints`.
+
+**ملفات اتعملت/اتعدلت:** backend/app/rag/pipeline.py، backend/app/db/document_store.py (find_latest_document_by_doc_id)، backend/app/api/admin_documents.py، backend/scripts/test_admin_endpoints.py
+
+**الحالة:** ✅ تم (static gates green — التحقق التشغيلي على المستخدم). المستند المكرر الموجود حالياً («Course (1)») محتاج حذف يدوي من الواجهة.
+
+---
+
+## [2026-11-17] — Phase 3: إصلاحات صفحة المستندات + قبول كل الصيغ (قبل Task 5)
+
+**تم:**
+- **إصلاح قصّ الـDropdown:** قايمة `ui/Dropdown.tsx` كانت `absolute` فبتتقص جوه حاويات overflow (الجدول/المودال) — بقت **fixed-position** بإحداثيات مقيسة من الزرار نفسه (`position: fixed` بتخرج من قص الأجداد)، فتفتح تحت افتراضياً وفوق لو المساحة تحت مش كفاية، وبتعيد القياس مع الـscroll (بـcapture عشان الـscroll الداخلي مبيعملش bubble) والـresize، بـz-50.
+- **إصلاح input الملف:** الـinput الأصلي بقى `sr-only` وزرار مخصص «اختار ملف» مكانه — مكان رسالة المتصفح «No file chosen»، واسم الملف المختار بس بيظهر لما يختار فعلاً.
+- **كل الصيغ مدعومة (قرار 2026-11-17):** `.md` + `.pdf` + `.docx` + `.txt` — قبل كده Markdown بس.
+  - `requirements.txt`: pypdf==7.1.0 + python-docx==1.2.0 (متثبتين في الـvenv، appended بمحارف مرتبة).
+  - `app/rag/extractors.py` (جديد): استخراج موحّد لكل الصيغ — PDF بـpypdf (استيراد lazy جوه الـbranch)، DOCX بـpython-docx (فقرات + جداول + `\n\n` بين البلوكات)، MD/TXT بفك UTF-8. أخطاء واضحة بالعربي: `UnsupportedFormatError` / `ExtractionError` (PDF تالف/DOCX تالف/UTF-8 مش صالح).
+  - `app/rag/pipeline.py`: `ParsedDocument.auto_identity` + `document_from_plain_text(stem, text)` — للصيغ غير الـMarkdown: `doc_id`/`title` = اسم الملف من غير الامتداد (العربي زي ما هو، slug للـpaths بس)، `version` = UTC timestamp `%Y.%m.%d.%H%M%S`، `language="mixed"`. الـMarkdown زي ما هو (frontmatter إلزامي).
+  - `app/api/admin_documents.py`: `_read_upload` بيرجّع بايتات (تحقق امتداد + حجم)، `_resolve_or_422` بيستخرج ويبني الهوية (.md → parse_markdown_document، الباقي → document_from_plain_text؛ أي خطأ استخراج/تحليل → 422 برسالة المستخرج)، **الاستبدال بيثبّت هوية النسخة القديمة** (`target.doc_id`) لو `auto_identity` مهما اختلف اسم الملف الجديد، و**إعادة المعالجة** بتعيد الاستخراج من المصدر بامتداد الملف المحفوظ (الـUTF-8 hardcoded اتشال).
+  - Frontend: `DocumentUploader` بيقبل `.md,.pdf,.docx,.txt` بتحقق امتداد مبكر، و`fileHint`/`fileLabel`/`wrongExtension`/`chooseFile` اتحدثوا في en + ar.
+- **سكريبت الاختبار:** حالة «رفع ملف غير Markdown → 422» بقت «رفع ملف بامتداد غير مدعوم (.exe) → 422» — `.txt` بقى رفع صالح.
+- **التحقق الثابت:** compileall + imports green (backend)، وlint + tsc + build (18 routes) green (frontend)، واختبار استخراج موضعي: .txt و.docx رجّعوا نص صح، وPDF تالف → `ExtractionError` بالرسالة العربي. **التشغيلي على Supabase** (رفع pdf/docx حقيقي + دورة استبدال): في الترمينال بتاع المستخدم — `python -m scripts.test_admin_endpoints`.
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/rag/extractors.py — جديد | pipeline.py + admin_documents.py — اتعدلوا | backend/requirements.txt
+- frontend/components/ui/Dropdown.tsx — قايمة fixed | frontend/features/admin-documents/components/DocumentUploader.tsx
+- frontend/messages/en.json + ar.json — مفاتيح الـuploader
+- backend/scripts/test_admin_endpoints.py — حالة الـ422
+
+**الحالة:** ✅ تم (static gates green — التحقق التشغيلي على المستخدم).
+
+---
+
+## [2026-11-17] — Phase 3 (Frontend): صفحة إدارة المستندات /admin/documents (Task 4)
+
+**تم:**
+- **`features/admin-documents/` (feature-local حسب قسم 9):** `types.ts` (DocumentSummary/AuditEntry/الحالات/الـcategories الثلاثة + حد 20MB)، `api/documents.ts` (نداءات الـ9 endpoints — الرفع/الاستبدال multipart بـFormData من غير Content-Type يدوي)، `hooks/useDocuments.ts` (القايمة + فلترة category وبحث بـdebounce 400ms + الأكشنز كلها + **polling للـprocessing بس** — كل ثانيتين لحد ما الصف يخرج من processing ويتوقف)، والمكونات: `DocumentsScreen` (التجميع)، `DocumentTable` (أعمدة PRD 10.5-أ + عمود أكشنز بأيقونات بـaria-labels — تعطيل كامل لصف processing)، `DocumentFilters`، `CategoryPicker` (wrapper على ui/Dropdown)، `DocumentUploader` (مودال رفع/استبدال بتحقق مبكر: .md + ≤20MB)، `VersionHistoryModal`، `AuditLogPanel`، `StatusBadge` (توكنز: active=success، failed=error، processing=primary+spinner، inactive=محايد).
+- **`components/ui/Modal.tsx`:** المودال المشترك من قايمة قسم 9 — Escape/نقر بره للإغلاق، focus على اللوحة، role=dialog. مستخدم في الرفع/التعديل/**تأكيد الحذف الإلزامي** (PRD 10.5-ج)/النسخ/الـaudit.
+- **`components/shared/AppShell.tsx`:** هيكل الصفحات (sidebar + drawer الموبايل) اتسحب من (chat)/layout — الـ(chat) و(admin) الاتنين بيستخدموه (بدون تكرار)، ومفاتيح openMenu/showSidebar اتنقلت لـ`common.sidebar`.
+- **كل الـcopy في `messages/en.json` + `ar.json` تحت `adminDocuments.*`** (صفر strings ثابتة) — ورسائل رفض الـbackend العربي بتتعرض زي ما هي: `apiJson` في `lib/api/client.ts` اتحسّن يقرا `detail` من جسم الـerror، والـContent-Type مش بيتحط للـFormData.
+- **التحقق:** lint + `tsc --noEmit` + `build` (18 routes، /[locale]/admin/documents متسجلة) كلهم green. إصلاحات من الـlint: نمط «مفيش setState متزامن في effect» (جلب بـpromise callbacks + loading مشتق من null + مودالات بـrender مشروط عشان التصفير التلقائي).
+
+**ملفات اتعملت/اتعدلت:**
+- frontend/features/admin-documents/** — جديدة (types/api/hook/7 مكونات)
+- frontend/components/ui/Modal.tsx + 6 أيقونات في icons.tsx — جداد
+- frontend/components/shared/AppShell.tsx — جديدة | (chat)/layout.tsx — بقى wrapper | (admin)/layout.tsx — الحماية + AppShell
+- frontend/lib/api/client.ts (FormData + error detail)، frontend/lib/utils.ts (formatDateTime)
+- frontend/messages/en.json + ar.json — adminDocuments.* + common.sidebar/modal
+
+**الحالة:** ✅ تم (lint + types + build green). **المتبقي: walkthrough بصري على المستخدم** — uvicorn + `npm run dev` → login admin@reelestate.demo → دورة كاملة رفع→processing→active→استبدال→حذف.
+
+---
+
+## [2026-11-17] — Phase 3 (Backend): إدارة الموظفين (Task 3)
+
+**تم:**
+- **`app/db/employee_store.py`:** قراية الموظفين من profiles (SQLAlchemy بـbind params، الأقدم أولاً). الإيميل **مش في profiles** بالتصميم (عايش في auth.users بس) — دمجه بيحصل في طبقة الـAPI.
+- **`app/api/admin_employees.py` (2 endpoints):**
+  - `GET /admin/employees` — قائمة `{id, full_name, role, email, created_at}` مع دمج الإيميل من auth.users عبر admin API (لف صفحات `list_users` بنفس نمط seed_demo_accounts — العدد المتوقع صغير).
+  - `POST /admin/employees` — إضافة موظف (PRD 10.6): الـadmin بيكتب الاسم + الـrole (Literal sales/hr/admin → 422 غير كده) + **الـemail local-part** (قرار معتمد: مفيش توليد تلقائي من الاسم لأن الأسامي العربية مش صالحة كإيميل — الـPRD افترض أسامي لاتينية؛ النمط `^[a-z0-9](...)$` 2..64 حرف) → السيرفر يولّد **password مؤقت** بـ`secrets.token_urlsafe` (~72 بت) → `create_user(email_confirm=True)` → insert profiles → audit `add_employee`. التكرار → **409** (فحص قبل + fallback بعد سباق الـcreate). الفشل بعد إنشاء حساب الـAuth → **compensating delete** (مفيش حسابات يتيمة من غير profile). الكريدنشيالز بتترجع **مرة واحدة** في الـresponse — مش بيتخزنوا صريحين في أي جدول ولا اللوج (hash بس في auth.users)، وفُقدانهم = حساب مش قابل للاسترجاع (إعادة تعيين الباسورد = مرحلة لاحقة).
+- **`backend/scripts/test_admin_employees.py`:** نفس النمط (TestClient + demo_auth، exit 0/1/2، فحص مسبقات يشوف الـseed) — مصادقة 401/403، القائمة فيها الـdemo الثلاثة بإيميلاتهم، role/local غير صالحين → 422، إيميل محجوز (admin@) → 409، إضافة → 201 → **الدخول بالكريدنشيالز المؤقتة فعلاً (password grant)** → ظهور في القائمة → تنضيف بمسح حساب auth (profiles cascade). صفر استهلاك LLM.
+- **التحقق الثابت:** compileall + imports + OpenAPI (GET/POST /admin/employees متسجلين) green. **والتشغيلي: السكريبت عدّى 15/15 على Supabase الحقيقي** — تصحيحات طلعت من التشغيل: `_email_map` كانت بتحط مفاتيح str (supabase-py بيرجّع user.id كنص) وبتدور بمفتاح UUID فكل الإيميلات كانت بترجع None — اتوحّدت بـ`UUID(str(user.id))`؛ سكريبت الاختبار كان بستورد `EMAIL_DOMAIN` من demo_auth (بالـ@ جواه) فبني إيميل `@@` — بيتعرّف محلياً من غير @؛ فحص التنضيف كان بيقيس `is not None` و`delete_user` بيرجّع None على النجاح — بقى مفيش exception = نجاح.
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/db/employee_store.py، backend/app/api/admin_employees.py — جداد
+- backend/app/main.py — راوتر admin_employees
+- backend/scripts/test_admin_employees.py — جديدة
+
+**الحالة:** ✅ تم ومتحقق تشغيلياً (15/15 اختبار على Supabase الحقيقية — إنشاء موظف + دخول فعلي بالكريدنشيالز المؤقتة + تنضيف كامل).
+
+---
+
+## [2026-11-17] — Phase 3 (Backend): الأساس + دورة حياة المستندات كاملة (Tasks 1-2)
+
+**تم:**
+- **Task 1 — migration 003 (`backend/app/db/migrations/003_admin_phase.sql`):** جدول `audit_logs` (Tech-Stack §3) — من غير FK على `target_id` عمداً عشان سجل الحذف يفضل موجود بعد تمسح المستند (PRD 10.5-د)، + indexes على target وcreated_at؛ توسيع `documents_status_check` لـ`('active','inactive','processing','failed')` (اسم الـconstraint الافتراضي من schema.sql بيتظبط بـdrop+add بنفس الاسم)؛ storage bucket خاص `documents` (غير public، file_size_limit 20MB)؛ RLS: قراية audit_logs للـadmin + بوليسي delete للمستندات للـadmin (كانت ناقصة في 002). كل الـstatements idempotent. **schema.sql اتمرّن زي 001** (audit_logs قسم 8 + الحالات الجديدة) عشان الإعدادات الجديدة اللي بتزروعه من الأول.
+- **Task 2a — استخراج `app/rag/pipeline.py`:** المصدر الوحيد لمنطق المعالجة (chunk → embed → استبدال chunks) من ingest.py: `parse_markdown_document` (frontmatter إلزامي doc_id/title/version — 422 برسالة عربية بتسمي الحقول الناقصة؛ الـdoc_id **مش بيتslugify** عشان الـidempotency تبقى مطابقة للقديم)، `process_document`، `replace_chunks`، `slugify_for_path` (لآمن مسارات الـStorage بس)، + exceptions مخصصة (MissingFrontmatterError/EmptyDocumentError). `ALL_CATEGORIES` بيتستورد من `retrieval.py` — النسخة الرابعة المكررة اتمسحت. ingest.py بقى سكريبت رقيق بيمرر للـpipeline (سلوك التجاهل للـcategory غير المعروفة زي ما هو).
+- **Task 2b — طبقات الداتا:** `app/db/document_store.py` (Pydantic + bind params بالكامل — قائمة مع فلتر category/search واسم الـuploader بـJOIN profiles، find، create بـstatus processing، set status/category **مع jsonb_set لـmetadata.category في الـchunks** (من غير إعادة embedding)، `deactivate_other_versions` (بتقفل مشكلة 2025.1/2026.1 المزدوجة)، versions، delete)، `app/db/audit_store.py` (record + list بـLEFT JOIN profiles)، `app/db/storage_files.py` (رفع/قراية/مسح best-effort — مسارين: bucket للجديد و`data/` على الديسك للـlegacy).
+- **Task 2c — `app/api/admin_documents.py` (9 endpoints):** GET list (?category=&search=) وGET {id} (poll endpoint) وPOST رفع (.md بس، category اختيار يدوي من الفورم حسب PRD 10.5-ب، 201 + BackgroundTask) وPATCH (category/status بس، 409 لو processing) وPOST replace (نسخة جديدة بـdoc_id نفسه — 409 لو doc_id مختلق أو نسخة مكررة؛ الفشل بيسيب القديمة active) وPOST reprocess (نفس الملف من مصدره) وDELETE (204 — chunks cascade، ملف best-effort، السجل بيتكتب بعد المسح) وGET versions وGET audit (**بيشتغل بعد الحذف كمان**: مستند مش موجود + سجل موجود = 200). كل العمليات بتتسجل في audit_logs بالأكشن الصح. حمايات: 401/403 عبر require_admin على مستوى الـrouter، الحجم 20MB، UTF-8، منع التعديل أثناء المعالجة (409)، رفع مكرر doc_id+version → 409 (مش هيبني نسختين active يدخلوا الـretrieval).
+- **Task 2d — main.py:** راوتر admin_documents + CORS widened لـPATCH/DELETE.
+- **Task 2e — `backend/scripts/test_admin_endpoints.py`:** نفس نمط سكريبت /chat (TestClient + demo_auth، exit codes 0/1/2، فحص مسبقات بيطابق تطبيق migration 003 عبر pg_constraint) — مصادقة 401/403، فشل الرفع الثلاثة، رفع سعيد + polling لحد active، تضارب النسخ 409، PATCH/404s، استبدال (القديمة inactive تلقائياً)، reprocess، الـaudit قبل وبعد الحذف، وتنضيف كامل في الآخر. **بيستهلك embeddings بس** (2-3 chunks لكل ملف اختبار) — صفر استهلاك chat.
+- **التحقق التشغيلي:** `scripts/test_admin_endpoints.py` عدّى **23/23** على Supabase الحقيقي (بعد ما الـuser طبّق 003 في SQL Editor) — المصادقة، فشل الرفع، الرفع → processing → active، تضارب النسخ، PATCH، الاستبدال (القديمة inactive تلقائياً)، إعادة المعالجة، الـaudit قبل وبعد الحذف، والحذف. تصحيحات طلعت من التشغيل الفعلي: `_validate_category` كانت بتتحقق من مفاتيح `ROLE_ALLOWED_CATEGORIES` (الأدوار) بدل `ALL_CATEGORIES` (الـcategories) — الرفع الإداري بيقبل أي category معروفة؛ `to_jsonb(:category)` بparam من غير نوع (psycopg "polymorphic type") فاتحول لـ`cast(:category AS text)` — والـ`::text` ممنوعة جنب الـbind في text() (الـlookahead بتاع SQLAlchemy بيرفضها فالبند بيختفي من الـparameters)؛ `DocumentSummary` كانت مش بتحمل `source_path` فإعادة المعالجة كانت بتفشل — اتضاف (هتنفع كمان لعرض اسم الملف في جدول الـUI). `HTTP_422_UNPROCESSABLE_ENTITY` المتقادمة اتبدلت بـ`HTTP_422_UNPROCESSABLE_CONTENT`.
+
+**ملفات اتعملت/اتعدلت:**
+- backend/app/db/migrations/003_admin_phase.sql — جديدة (**متطبّقة فعلياً في Supabase**)
+- backend/app/db/schema.sql — audit_logs + الحالات الجديدة (مزامنة مع 003)
+- backend/app/rag/pipeline.py — جديدة | backend/app/rag/ingest.py — أُعيد كـthin caller
+- backend/app/db/document_store.py، audit_store.py، storage_files.py — جديدة
+- backend/app/api/admin_documents.py — جديدة | backend/app/main.py — راوتر + CORS
+- backend/scripts/test_admin_endpoints.py — جديدة
+
+**الحالة:** ✅ تم ومتحقق تشغيلياً (23/23 اختبار على الداتابيز الحقيقية). ملاحظة: تشغيلات الاختبار الفاشلة السابقة سابت مستندات `test-admin-*` يتيمة في الـDB — هتتمسح من واجهة الـadmin لما تجهز (Task 4).
+
+---
+
 ## [2026-11-16] — متابعات الـsidebar: نقل تفضيلات الموظف (theme + language) لأسفل الـpanel (مراجعة المستخدم)
 
 **تم:**

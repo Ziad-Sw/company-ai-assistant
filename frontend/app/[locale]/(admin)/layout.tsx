@@ -1,9 +1,14 @@
 import { RequireAdmin } from "@/features/auth/components/RequireAuth";
+import { AppShell } from "@/components/shared/AppShell";
 
 /**
- * بوابهة الـroute group بتاع /(admin)/* — صفحات Phase 3 (إدارة المستندات
- * وإضافة موظف) هتندرج تحتها مباشرة وهتلاقي الـguard جاهز.
+ * بوابهة + هيكل صفحات الـadmin (Phase 3 — PRD 10.5/10.6): الحماية
+ * admin-only، وبعدها نفس هيكل الـchat (sidebar قابل للطي + drawer موبايل).
  */
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  return <RequireAdmin>{children}</RequireAdmin>;
+  return (
+    <RequireAdmin>
+      <AppShell>{children}</AppShell>
+    </RequireAdmin>
+  );
 }

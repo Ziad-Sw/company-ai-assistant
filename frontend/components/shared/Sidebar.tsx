@@ -6,8 +6,9 @@ import { useRouter } from "next/navigation";
 import { LanguageSwitcher } from "@/components/shared/LanguageSwitcher";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { Button } from "@/components/ui/Button";
-import { LogOutIcon, PanelToggleIcon, PlusIcon } from "@/components/ui/icons";
+import { ListIcon, LogOutIcon, PanelToggleIcon, PlusIcon, UsersIcon } from "@/components/ui/icons";
 import { cn } from "@/lib/utils";
+import { Link } from "@/i18n/navigation";
 import { supabase } from "@/features/auth/api/supabase";
 import { ConversationList } from "@/features/conversations/components/ConversationList";
 import { useAuthStore } from "@/store/authStore";
@@ -32,6 +33,7 @@ export function Sidebar({ open, collapsed, onClose, onCollapse }: SidebarProps) 
   const router = useRouter();
   const locale = useLocale();
   const t = useTranslations("chat");
+  const tSidebar = useTranslations("common.sidebar");
   const fullName = useAuthStore((state) => state.profile?.fullName ?? "");
   const role = useAuthStore((state) => state.profile?.role ?? "");
   const setActiveConversation = useChatStore((state) => state.setActiveConversation);
@@ -101,6 +103,30 @@ export function Sidebar({ open, collapsed, onClose, onCollapse }: SidebarProps) 
         </div>
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-3">
+          {/* قسم الـadmin — بيظهر لحساب الـadmin بس (PRD 10.5/10.6: صفحات الإدارة). */}
+          {role === "admin" ? (
+            <div className="mb-3 border-b border-border pb-3">
+              <p className="px-2 pb-1 text-xs font-medium text-muted">{tSidebar("adminSection")}</p>
+              <Link
+                href="/admin/documents"
+                onClick={onClose}
+                className="flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-2 text-sm text-foreground
+                  hover:bg-primary-subtle focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-primary/30"
+              >
+                <ListIcon />
+                {tSidebar("adminDocuments")}
+              </Link>
+              <Link
+                href="/admin/employees"
+                onClick={onClose}
+                className="flex items-center gap-2 rounded-[var(--radius-md)] px-2 py-2 text-sm text-foreground
+                  hover:bg-primary-subtle focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-primary/30"
+              >
+                <UsersIcon />
+                {tSidebar("adminEmployees")}
+              </Link>
+            </div>
+          ) : null}
           <ConversationList />
         </nav>
 

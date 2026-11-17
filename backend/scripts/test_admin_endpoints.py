@@ -152,13 +152,15 @@ def main() -> int:
     _report("GET قائمة المستندات بالـadmin → 200", response.status_code == 200)
 
     # ── فشل الرفع (كل الحالات دي ما بتستهلكش embedding) ─────────────────────
+    # (قرار 2026-11-17: كل الصيغ مدعومة — .txt دلوقتي رفع صالح، فالحالة السالبة
+    # اتبنت عن امتداد مش مدعوم خالص.)
     response = client.post(
         "/admin/documents",
         headers=admin_headers,
-        files={"file": ("notes.txt", b"hello", "text/plain")},
+        files={"file": ("notes.exe", b"hello", "application/octet-stream")},
         data={"category": "payment_policies"},
     )
-    _report("رفع ملف غير Markdown → 422", response.status_code == 422)
+    _report("رفع ملف بامتداد غير مدعوم → 422", response.status_code == 422)
     response = client.post(
         "/admin/documents",
         headers=admin_headers,
@@ -234,6 +236,46 @@ def main() -> int:
     response = client.get(f"/admin/documents/{document_id}/versions", headers=admin_headers)
     versions = {row["version"]: row["status"] for row in response.json()}
     _report("النسخة القديمة بقت inactive والجديدة active", versions.get("2026.1") == "inactive" and versions.get("2026.2") == "active", str(versions))
+
+    # ── Auto-replace (قرار 2026-11-17): رفع txt بنفس الاسم = نسخة لنفس الهوية،
+    # والقديمة تتقفل inactive — مش مستند جديد منفصل. والاسم بلاحقة المتصفح
+    # " (1)" بيتطبّع لنفس الهوية كمان.
+    response = client.post(
+        "/admin/documents",
+        headers=admin_headers,
+        files={"file": ("handbook.txt", "النسخة الأولى".encode(), "text/plain")},
+        data={"category": "company_info"},
+    )
+    _report("رفع txt هوية تلقائية → 201", response.status_code == 201, response.text)
+    if response.status_code == 201:
+        auto_first = response.json()
+        created_document_ids.append(auto_first["id"])
+        wait_until_processed(client, auto_first["id"], admin_headers)
+        response = client.post(
+            "/admin/documents",
+            headers=admin_headers,
+            files={"file": ("handbook (1).txt", "النسخة المحدثة".encode(), "text/plain")},
+            data={"category": "company_info"},
+        )
+        _report("رفع txt محدّث (بلاحقة (1)) → 201 auto-replace", response.status_code == 201, response.text)
+        if response.status_code == 201:
+            auto_second = response.json()
+            created_document_ids.append(auto_second["id"])
+            wait_until_processed(client, auto_second["id"], admin_headers)
+            _report(
+                "Auto-replace: نفس الهوية والنسخة القديمة inactive",
+                auto_second["doc_id"] == auto_first["doc_id"],
+                f"{auto_first['doc_id']} → {auto_second['doc_id']}",
+            )
+            response = client.get(f"/admin/documents/{auto_second['id']}/versions", headers=admin_headers)
+            auto_versions = response.json()
+            _report(
+                "Auto-replace: نسختين لنفس doc_id والقديمة inactive",
+                len(auto_versions) == 2
+                and sum(row["status"] == "active" for row in auto_versions) == 1
+                and sum(row["status"] == "inactive" for row in auto_versions) == 1,
+                str([(row["version"], row["status"]) for row in auto_versions]),
+            )
 
     # ── إعادة المعالجة ──────────────────────────────────────────────────────
     response = client.post(f"/admin/documents/{new_document_id}/reprocess", headers=admin_headers)

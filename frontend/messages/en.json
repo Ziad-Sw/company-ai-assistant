@@ -1,7 +1,18 @@
 {
   "common": {
     "switchLanguage": "Switch language",
-    "toggleTheme": "Switch theme"
+    "toggleTheme": "Switch theme",
+    "sidebar": {
+      "openMenu": "Open menu",
+      "collapseSidebar": "Collapse sidebar",
+      "showSidebar": "Show sidebar",
+      "adminSection": "Admin",
+      "adminDocuments": "Documents",
+      "adminEmployees": "Employees"
+    },
+    "modal": {
+      "close": "Close"
+    }
   },
   "auth": {
     "title": "Sign in",
@@ -33,10 +44,7 @@
       "empty": "No conversations yet — your chats will appear here.",
       "listLabel": "Conversations",
       "loadingConversations": "Loading conversations…",
-      "loadFailed": "Couldn't load your conversations. Try again in a moment.",
-      "openMenu": "Open menu",
-      "collapseSidebar": "Collapse sidebar",
-      "showSidebar": "Show sidebar"
+      "loadFailed": "Couldn't load your conversations. Try again in a moment."
     },
     "model": {
       "label": "Model",
@@ -62,6 +70,164 @@
       "conversationNotFound": "This conversation doesn't exist or isn't yours.",
       "conversationLoadFailed": "Couldn't load this conversation. Try again in a moment.",
       "backToChat": "Back to new chat"
+    }
+  },
+  "adminDocuments": {
+    "title": "Documents",
+    "subtitle": "Manage the company knowledge base — what you upload here is what the assistant answers from.",
+    "uploadButton": "Upload document",
+    "loading": "Loading documents…",
+    "loadFailed": "Couldn't load the documents. Check your connection and try again.",
+    "retry": "Try again",
+    "empty": "No documents yet.",
+    "emptyHint": "Upload the first Markdown file to make it available to the assistant.",
+    "emptyFiltered": "No documents match these filters.",
+    "dismiss": "Dismiss",
+    "dismissError": "Dismiss the error",
+    "categories": {
+      "all": "All categories",
+      "pickCategory": "Pick a category…",
+      "ariaLabel": "Document category",
+      "property_listings": "Property listings",
+      "payment_policies": "Payment policies",
+      "company_info_support": "Company info & support"
+    },
+    "filters": {
+      "searchPlaceholder": "Search by name…",
+      "searchAriaLabel": "Search documents by name"
+    },
+    "table": {
+      "document": "Document",
+      "category": "Category",
+      "version": "Version",
+      "status": "Status",
+      "uploadedBy": "Uploaded by",
+      "updatedAt": "Last update",
+      "actions": "Actions"
+    },
+    "status": {
+      "active": "Active",
+      "inactive": "Inactive",
+      "processing": "Processing",
+      "failed": "Failed"
+    },
+    "actions": {
+      "editCategory": "Edit category",
+      "replace": "Replace with a new version",
+      "reprocess": "Reprocess",
+      "versions": "Version history",
+      "audit": "Audit trail",
+      "activate": "Activate",
+      "deactivate": "Deactivate",
+      "delete": "Delete permanently"
+    },
+    "uploader": {
+      "uploadTitle": "Upload a document",
+      "replaceTitle": "Replace “{title}” (version {version})",
+      "replaceHint": "The new file must have the same doc_id with a new version number. The current version stays active until the new one is ready.",
+      "categoryLabel": "Category",
+      "fileLabel": "File",
+      "fileHint": "PDF, DOCX, Markdown (.md), or TXT — up to {maxMb} MB.",
+      "chooseFile": "Choose file",
+      "noFile": "Pick a file first.",
+      "wrongExtension": "Supported formats: PDF, DOCX, Markdown (.md), or TXT.",
+      "tooLarge": "The file is larger than {maxMb} MB.",
+      "missingCategory": "Pick a category first.",
+      "submitUpload": "Upload",
+      "submitReplace": "Replace",
+      "cancel": "Cancel"
+    },
+    "editModal": {
+      "title": "Edit category",
+      "hint": "Change the category of “{title}”. The stored content doesn't need re-processing.",
+      "categoryLabel": "Category",
+      "save": "Save",
+      "cancel": "Cancel"
+    },
+    "deleteModal": {
+      "title": "Delete document",
+      "body": "Delete “{title}” permanently?",
+      "warning": "Its chunks are removed and the assistant stops answering from it immediately. The audit trail stays available.",
+      "confirm": "Delete permanently",
+      "cancel": "Cancel"
+    },
+    "versions": {
+      "title": "Version history",
+      "loading": "Loading versions…",
+      "loadFailed": "Couldn't load the version history. Try again in a moment.",
+      "empty": "No versions recorded for this document.",
+      "versionLabel": "Version {version}",
+      "current": "this view"
+    },
+    "audit": {
+      "title": "Audit trail",
+      "loading": "Loading the trail…",
+      "loadFailed": "Couldn't load the audit trail. Try again in a moment.",
+      "empty": "No operations recorded for this document.",
+      "actions": {
+        "upload": "Uploaded",
+        "edit": "Category edited",
+        "replace": "Replaced",
+        "deactivate": "Deactivated",
+        "activate": "Activated",
+        "delete": "Deleted",
+        "reprocess": "Reprocessed",
+        "add_employee": "Employee added"
+      }
+    }
+  },
+  "adminEmployees": {
+    "title": "Employees",
+    "subtitle": "Team accounts and their roles — new employees sign in with the credentials you create here.",
+    "addButton": "Add employee",
+    "loading": "Loading employees…",
+    "loadFailed": "Couldn't load the employees. Check your connection and try again.",
+    "retry": "Try again",
+    "empty": "No employees yet.",
+    "emptyHint": "Add the first employee to give them chat access with their role's permissions.",
+    "dismiss": "Dismiss",
+    "dismissError": "Dismiss the error",
+    "table": {
+      "name": "Name",
+      "role": "Role",
+      "email": "Email",
+      "createdAt": "Added"
+    },
+    "roles": {
+      "sales": "Sales",
+      "hr": "HR",
+      "admin": "Admin"
+    },
+    "roleDescriptions": {
+      "sales": "Answers questions about properties and payment plans",
+      "hr": "Answers questions about HR policies",
+      "admin": "Full access: documents, employees, and all categories"
+    },
+    "addModal": {
+      "title": "Add an employee",
+      "nameLabel": "Full name",
+      "namePlaceholder": "e.g. Sara Ahmed",
+      "roleLabel": "Role",
+      "rolePlaceholder": "Pick a role…",
+      "roleAriaLabel": "Employee role",
+      "emailLabel": "Email username",
+      "emailPlaceholder": "e.g. sara.ahmed",
+      "emailHint": "Signs in as this name @reelestate.demo — lowercase letters, numbers, dots, or dashes.",
+      "errorName": "Enter the employee's full name.",
+      "errorRole": "Pick a role first.",
+      "errorEmail": "Use lowercase letters, numbers, dots, or dashes — 2 to 64 characters, starting and ending with a letter or number.",
+      "submit": "Create employee",
+      "cancel": "Cancel"
+    },
+    "credentialsModal": {
+      "title": "Employee created",
+      "warning": "Save these credentials now — they won't be shown again.",
+      "body": "Copy them and send them to {name} privately. They'll change the password after signing in.",
+      "emailLabel": "Email",
+      "passwordLabel": "Temporary password",
+      "copy": "Copy",
+      "copied": "Copied",
+      "done": "Done"
     }
   }
 }

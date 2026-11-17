@@ -38,6 +38,7 @@ class DocumentSummary(BaseModel):
     version: str
     language: str
     status: str
+    source_path: str | None
     uploaded_by_name: str | None
     updated_at: datetime
     created_at: datetime
@@ -45,7 +46,7 @@ class DocumentSummary(BaseModel):
 
 _LIST_SELECT = """
 SELECT d.id, d.doc_id, d.title, d.category, d.version, d.language, d.status,
-       p.full_name AS uploaded_by_name, d.updated_at, d.created_at
+       d.source_path, p.full_name AS uploaded_by_name, d.updated_at, d.created_at
 FROM public.documents d
 LEFT JOIN public.profiles p ON p.id = d.uploaded_by
 """
@@ -60,6 +61,7 @@ def _row_to_summary(row: Any) -> DocumentSummary:
         version=row.version,
         language=row.language,
         status=row.status,
+        source_path=row.source_path,
         uploaded_by_name=row.uploaded_by_name,
         updated_at=row.updated_at,
         created_at=row.created_at,
@@ -106,6 +108,16 @@ def find_document_id_by_version(doc_id: str, version: str) -> UUID | None:
             {"doc_id": doc_id, "version": version},
         ).scalar()
     return row
+
+
+def find_latest_document_by_doc_id(doc_id: str) -> DocumentSummary | None:
+    """أحدث نسخة مسجلة لنفس الهوية — للـauto-replace في الرفع (نسخة موجودة = الاستبدال هو المرجع)."""
+    with get_session_factory().begin() as session:
+        row = session.execute(
+            text(f"{_LIST_SELECT} WHERE d.doc_id = :doc_id ORDER BY d.created_at DESC LIMIT 1"),
+            {"doc_id": doc_id},
+        ).first()
+    return _row_to_summary(row) if row else None
 
 
 def create_document(
@@ -180,7 +192,7 @@ def set_document_category(document_id: UUID, category: str) -> None:
             text(
                 """
                 UPDATE public.chunks
-                SET metadata = jsonb_set(metadata, '{category}', to_jsonb(:category))
+                SET metadata = jsonb_set(metadata, '{category}', to_jsonb(cast(:category AS text)))
                 WHERE document_id = :document_id
                 """
             ),

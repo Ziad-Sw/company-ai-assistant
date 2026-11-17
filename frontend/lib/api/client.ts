@@ -55,7 +55,9 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
 
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${accessToken}`);
-  if (init.body && !headers.has("Content-Type")) {
+  // الـFormData (رفع ملفات الـadmin) لازم يسيب الـbrowser يحدد الـContent-Type
+  // بنفسه عشان يحط الـboundary بتاع الـmultipart.
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -72,7 +74,21 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await apiFetch(path, init);
   if (!response.ok) {
-    throw new ApiError(response.status, `الطلب ${path} فشل بـ${response.status}.`);
+    throw new ApiError(response.status, await errorMessageFrom(response));
   }
   return response.json() as Promise<T>;
+}
+
+/**
+ * رسالة الخطأ اللي بتتعرض: الـdetail من الـbackend الأول (رسائل endpoints
+ * الـadmin عربية وصريحة عن سبب الرفض — زي تضارب النسخ)، وgeneric احتياطي.
+ */
+export async function errorMessageFrom(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: string };
+    if (body?.detail) return body.detail;
+  } catch {
+    // الـbody مش JSON — نرجّع الرسالة الافتراضية
+  }
+  return `الطلب فشل بـ${response.status}.`;
 }

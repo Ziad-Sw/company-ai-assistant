@@ -23,10 +23,22 @@ type DropdownProps = {
   className?: string;
 };
 
+type ListboxCoords = {
+  position: "fixed";
+  left: number;
+  width: number;
+  top?: number;
+  bottom?: number;
+};
+
 /**
  * dropdown من الـDesign-System: bg-surface + border + radius-md، hover على
  * الخيارات بـprimary-subtle، والعنصر المختار عليه علامة ✓. بيفتح/يتقفل بالنقر،
  * والكيبورد (أسهم/Enter/Escape) مدعوم، وبيتقفل مع النقر بره أو Blur.
+ *
+ * القايمة list بتتكشط لو حطيناها absolute جوه حاويات overflow (الجدول/
+ * المودال) — فبنموضعها fixed بإحداثيات مقيسة من الزرار نفسه، وبنختار
+ * الاتجاه (تحت فوق مايتقفلوش) وبنعيد القياس مع الـscroll/resize.
  */
 export function Dropdown({
   options,
@@ -39,11 +51,38 @@ export function Dropdown({
   className = "",
 }: DropdownProps) {
   const listboxId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [listCoords, setListCoords] = useState<ListboxCoords | null>(null);
 
   const selected = options.find((option) => option.value === value) ?? null;
+
+  function measureCoords(): ListboxCoords {
+    const rect = triggerRef.current!.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    // بنفتح تحت افتراضياً، وفوق بس لو المساحة تحت مش كفاية والفوق أحسن منها.
+    const openUpward = spaceBelow < 180 && spaceAbove > spaceBelow;
+    return openUpward
+      ? { position: "fixed", left: rect.left, width: rect.width, bottom: window.innerHeight - rect.top }
+      : { position: "fixed", left: rect.left, width: rect.width, top: rect.bottom };
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    function reposition() {
+      setListCoords(measureCoords());
+    }
+    // scroll capture: الـscroll جوه حاويات مبيعملش bubble — بنسمع على أ stage الـdocument.
+    document.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      document.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -57,6 +96,7 @@ export function Dropdown({
   function openListbox() {
     if (options.length === 0) return;
     setActiveIndex(Math.max(0, options.findIndex((option) => option.value === value)));
+    setListCoords(measureCoords());
     setOpen(true);
   }
 
@@ -93,6 +133,7 @@ export function Dropdown({
   return (
     <div ref={rootRef} className={`relative ${className}`} onKeyDown={handleKeyDown}>
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         aria-haspopup="listbox"
@@ -116,13 +157,14 @@ export function Dropdown({
         </svg>
       </button>
 
-      {open ? (
+      {open && listCoords ? (
         <ul
           id={listboxId}
           role="listbox"
           aria-label={ariaLabel}
           aria-activedescendant={`${listboxId}-${activeIndex}`}
-          className="absolute bottom-full z-20 mb-1 max-h-64 w-full overflow-y-auto rounded-[var(--radius-md)] border border-border bg-surface p-1 shadow-lg"
+          style={listCoords}
+          className="absolute z-50 max-h-64 overflow-y-auto rounded-[var(--radius-md)] border border-border bg-surface p-1 shadow-lg"
         >
           {options.length === 0 ? (
             <li className="px-3 py-2 text-sm text-muted">{emptyLabel}</li>

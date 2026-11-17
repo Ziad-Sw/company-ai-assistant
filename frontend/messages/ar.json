@@ -1,7 +1,18 @@
 {
   "common": {
     "switchLanguage": "تغيير اللغة",
-    "toggleTheme": "تبديل المظهر"
+    "toggleTheme": "تبديل المظهر",
+    "sidebar": {
+      "openMenu": "افتح القائمة",
+      "collapseSidebar": "طيّ الشريط الجانبي",
+      "showSidebar": "إظهار الشريط الجانبي",
+      "adminSection": "الإدارة",
+      "adminDocuments": "المستندات",
+      "adminEmployees": "الموظفين"
+    },
+    "modal": {
+      "close": "إغلاق"
+    }
   },
   "auth": {
     "title": "تسجيل الدخول",
@@ -33,10 +44,7 @@
       "empty": "مفيش محادثات لسه — محادثاتك بتظهر هنا.",
       "listLabel": "المحادثات",
       "loadingConversations": "جاري تحميل المحادثات…",
-      "loadFailed": "مش قادرين نجيب محادثاتك — جرّب تاني بعد شوية.",
-      "openMenu": "افتح القائمة",
-      "collapseSidebar": "طيّ الشريط الجانبي",
-      "showSidebar": "إظهار الشريط الجانبي"
+      "loadFailed": "مش قادرين نجيب محادثاتك — جرّب تاني بعد شوية."
     },
     "model": {
       "label": "الموديل",
@@ -62,6 +70,164 @@
       "conversationNotFound": "المحادثة دي مش موجودة أو مش بتاعتك.",
       "conversationLoadFailed": "مش قادرين نفتح المحادثة دي — جرّب تاني بعد شوية.",
       "backToChat": "رجوع لمحادثة جديدة"
+    }
+  },
+  "adminDocuments": {
+    "title": "المستندات",
+    "subtitle": "إدارة قاعدة معرفة الشركة — اللي بترفعه هنا هو اللي المساعد بيجاوب منه.",
+    "uploadButton": "رفع مستند",
+    "loading": "جاري تحميل المستندات…",
+    "loadFailed": "مش قادرين نجيب المستندات — اتأكد من اتصالك وجرّب تاني.",
+    "retry": "جرّب تاني",
+    "empty": "مفيش مستندات لسه.",
+    "emptyHint": "ارفع أول ملف Markdown عشان يبقى متاح للمساعد.",
+    "emptyFiltered": "مفيش مستندات مطابقة للفلتر ده.",
+    "dismiss": "إخفاء",
+    "dismissError": "إخفاء رسالة الخطأ",
+    "categories": {
+      "all": "كل الـcategories",
+      "pickCategory": "اختار category…",
+      "ariaLabel": "تصنيف المستند",
+      "property_listings": "الوحدات المعروضة",
+      "payment_policies": "سياسات الدفع",
+      "company_info_support": "معلومات الشركة والدعم"
+    },
+    "filters": {
+      "searchPlaceholder": "بحث بالاسم…",
+      "searchAriaLabel": "بحث في المستندات بالاسم"
+    },
+    "table": {
+      "document": "المستند",
+      "category": "التصنيف",
+      "version": "الإصدار",
+      "status": "الحالة",
+      "uploadedBy": "رفعه",
+      "updatedAt": "آخر تحديث",
+      "actions": "إجراءات"
+    },
+    "status": {
+      "active": "نشِط",
+      "inactive": "مُعطّل",
+      "processing": "جاري المعالجة",
+      "failed": "فشل"
+    },
+    "actions": {
+      "editCategory": "تعديل التصنيف",
+      "replace": "استبدال بنسخة جديدة",
+      "reprocess": "إعادة المعالجة",
+      "versions": "سجل النسخ",
+      "audit": "سجل العمليات",
+      "activate": "تفعيل",
+      "deactivate": "تعطيل",
+      "delete": "حذف نهائي"
+    },
+    "uploader": {
+      "uploadTitle": "رفع مستند جديد",
+      "replaceTitle": "استبدال «{title}» (الإصدار {version})",
+      "replaceHint": "الملف الجديد لازم يكون بنفس doc_id ورقم إصدار جديد. النسخة الحالية بتفضل نشطة لحد ما الجديدة تجهز.",
+      "categoryLabel": "التصنيف",
+      "fileLabel": "الملف",
+      "fileHint": "PDF أو DOCX أو Markdown (.md) أو TXT — بحد أقصى {maxMb} ميجابايت.",
+      "chooseFile": "اختار ملف",
+      "noFile": "اختار ملف الأول.",
+      "wrongExtension": "الصيغ المدعومة: PDF أو DOCX أو Markdown (.md) أو TXT.",
+      "tooLarge": "الملف أكبر من {maxMb} ميجابايت.",
+      "missingCategory": "اختار التصنيف الأول.",
+      "submitUpload": "رفع",
+      "submitReplace": "استبدال",
+      "cancel": "إلغاء"
+    },
+    "editModal": {
+      "title": "تعديل التصنيف",
+      "hint": "بتغيّر تصنيف «{title}». المحتوى المخزّن مش محتاج إعادة معالجة.",
+      "categoryLabel": "التصنيف",
+      "save": "حفظ",
+      "cancel": "إلغاء"
+    },
+    "deleteModal": {
+      "title": "حذف المستند",
+      "body": "تمسح «{title}» نهائياً؟",
+      "warning": "قطعه النصية هتتمسح والمساعد بيقف يجاوب منه فوراً. سجل العمليات هيفضل متاح.",
+      "confirm": "حذف نهائي",
+      "cancel": "إلغاء"
+    },
+    "versions": {
+      "title": "سجل النسخ",
+      "loading": "جاري تحميل النسخ…",
+      "loadFailed": "مش قادرين نجيب سجل النسخ — جرّب تاني بعد شوية.",
+      "empty": "مفيش نسخ مسجلة للمستند ده.",
+      "versionLabel": "الإصدار {version}",
+      "current": "العرض الحالي"
+    },
+    "audit": {
+      "title": "سجل العمليات",
+      "loading": "جاري تحميل السجل…",
+      "loadFailed": "مش قادرين نجيب سجل العمليات — جرّب تاني بعد شوية.",
+      "empty": "مفيش عمليات مسجلة للمستند ده.",
+      "actions": {
+        "upload": "رفع",
+        "edit": "تعديل التصنيف",
+        "replace": "استبدال",
+        "deactivate": "تعطيل",
+        "activate": "تفعيل",
+        "delete": "حذف",
+        "reprocess": "إعادة معالجة",
+        "add_employee": "إضافة موظف"
+      }
+    }
+  },
+  "adminEmployees": {
+    "title": "الموظفين",
+    "subtitle": "حسابات الفريق وأدوارهم — الموظف الجديد هيدخل بالكريدنشيالز اللي بتعملها هنا.",
+    "addButton": "إضافة موظف",
+    "loading": "تحميل الموظفين…",
+    "loadFailed": "مقدرناش نجيب الموظفين. اتأكد من الاتصال وجرب تاني.",
+    "retry": "جرب تاني",
+    "empty": "مفيش موظفين لسه.",
+    "emptyHint": "ضيف أول موظف يخليه يقدر يستخدم المساعد بصلاحيات دوره.",
+    "dismiss": "إخفاء",
+    "dismissError": "إخفاء رسالة الخطأ",
+    "table": {
+      "name": "الاسم",
+      "role": "الدور",
+      "email": "الإيميل",
+      "createdAt": "تاريخ الإضافة"
+    },
+    "roles": {
+      "sales": "مبيعات",
+      "hr": "موارد بشرية",
+      "admin": "أدمن"
+    },
+    "roleDescriptions": {
+      "sales": "بيجاوب على أسئلة العقارات وخطط السداد",
+      "hr": "بيجاوب على أسئلة سياسات الموارد البشرية",
+      "admin": "صلاحيات كاملة: المستندات والموظفين وكل التصنيفات"
+    },
+    "addModal": {
+      "title": "إضافة موظف",
+      "nameLabel": "الاسم بالكامل",
+      "namePlaceholder": "مثال: سارة أحمد",
+      "roleLabel": "الدور",
+      "rolePlaceholder": "اختار الدور…",
+      "roleAriaLabel": "دور الموظف",
+      "emailLabel": "اسم الإيميل",
+      "emailPlaceholder": "مثال: sara.ahmed",
+      "emailHint": "هيدخل باسم name@reelestate.demo — حروف صغيرة وأرقام ونقط أو شرط.",
+      "errorName": "اكتب اسم الموظف بالكامل.",
+      "errorRole": "اختار الدور الأول.",
+      "errorEmail": "استخدم حروف صغيرة وأرقام ونقط أو شرط — من 2 لـ64 حرف، بتبدأ وبتخلص بحرف أو رقم.",
+      "submit": "إنشاء الموظف",
+      "cancel": "إلغاء"
+    },
+    "credentialsModal": {
+      "title": "تم إنشاء الموظف",
+      "warning": "احفظ الكريدنشيالز دي دلوقتي — مش هتظهر تاني.",
+      "body": "انسخها وابعتهم لـ{name} بطريقة خاصة. هيغيّر الباسورد بعد أول دخول.",
+      "emailLabel": "الإيميل",
+      "passwordLabel": "الباسورد المؤقت",
+      "copy": "نسخ",
+      "copied": "اتنسخ",
+      "done": "تم"
     }
   }
 }

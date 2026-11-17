@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin_documents, chat, conversations, me, models
+from app.api import admin_documents, admin_employees, chat, conversations, me, models
 from app.core.config import get_settings
 
 # session.py وsupabase_client.py وembeddings.py بيقروا الـkeys من os.environ
@@ -38,3 +38,4 @@ app.include_router(conversations.router)
 app.include_router(me.router)
 app.include_router(models.router)
 app.include_router(admin_documents.router)
+app.include_router(admin_employees.router)

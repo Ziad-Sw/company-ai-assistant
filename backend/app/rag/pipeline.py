@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from uuid import UUID
 
 import frontmatter
@@ -26,6 +27,7 @@ __all__ = [
     "EmptyDocumentError",
     "MissingFrontmatterError",
     "ParsedDocument",
+    "document_from_plain_text",
     "parse_markdown_document",
     "process_document",
     "replace_chunks",
@@ -54,6 +56,10 @@ class ParsedDocument(BaseModel):
     language: str
     category: str | None
     body: str
+    # صيغ غير Markdown (PDF/DOCX/TXT) بتاخد هوية تلقائية من اسم الملف —
+    # الـreplace بيستخدمها عشان يثبّت doc_id بتاع النسخة القديمة مهما اختلف
+    # اسم الملف الجديد (الـmd بيتحقق من الـfrontmetadata بدلها).
+    auto_identity: bool = False
 
 
 def parse_markdown_document(raw_text: str) -> ParsedDocument:
@@ -128,6 +134,32 @@ def process_document(sb: Client, document_id: UUID, category: str, body: str) ->
     # في نص المستند، الـchunks القديمة تفضل موجودة بدل ما المستند يفضل فاضي.
     replace_chunks(sb, document_id, rows)
     return len(rows)
+
+
+def document_from_plain_text(filename_stem: str, text: str) -> ParsedDocument:
+    """
+    هوية تلقائية لصيغ غير الـMarkdown: الـdoc_id من اسم الملف (بدون امتداد —
+    عربي أو لاتيني زي ما هو؛ الـslugification لمسار الـStorage بس)، والإصدار
+    timestamp عشان كل رفع/استبدال يبقى إصدار جديد من غير تضارب.
+    """
+    # المتصفح بيرقّم التحميلات المتكررة بـ" (1)"، " (2)" — لو دخلت الهوية
+    # كده هينزل ملف محدّث كـمستند جديد منفصل بدل نسخة لنفس الهوية.
+    stem = re.sub(r"\s+\(\d+\)$", "", filename_stem.strip()).strip()
+    if not stem:
+        stem = filename_stem.strip()
+    if not text.strip():
+        raise EmptyDocumentError("محتوى المستند فاضي — مفيش حاجة تتقسّم لـchunks.")
+
+    version = datetime.now(timezone.utc).strftime("%Y.%m.%d.%H%M%S")
+    return ParsedDocument(
+        doc_id=stem,
+        title=stem,
+        version=version,
+        language="mixed",
+        category=None,
+        body=text,
+        auto_identity=True,
+    )
 
 
 def slugify_for_path(value: str) -> str:

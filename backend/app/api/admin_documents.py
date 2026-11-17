@@ -13,7 +13,8 @@ BackgroundTask بيchunks وembeds → active (أو failed من غير ما ال
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Literal
+from pathlib import Path
+from typing import Annotated, Literal, NamedTuple
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
@@ -30,14 +31,21 @@ from app.db.storage_files import (
     upload_document_file,
 )
 from app.db.supabase_client import get_supabase
+from app.rag.extractors import (
+    ExtractionError,
+    SUPPORTED_EXTENSIONS,
+    UnsupportedFormatError,
+    extract_text,
+)
 from app.rag.pipeline import (
     ALL_CATEGORIES,
     EmptyDocumentError,
     MissingFrontmatterError,
+    ParsedDocument,
+    document_from_plain_text,
     parse_markdown_document,
     process_document,
 )
-from app.rag.retrieval import ROLE_ALLOWED_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +61,55 @@ router = APIRouter(
 _NOT_FOUND_MESSAGE = "المستند مش موجود."
 _PROCESSING_MESSAGE = "المستند بيتعالج دلوقتي — استنى يخلص أو جرب تاني بعد شوية."
 _INVALID_CATEGORY_MESSAGE = f"الـcategory مش من القائمة: {', '.join(sorted(ALL_CATEGORIES))}."
-_UNSUPPORTED_FILE_MESSAGE = "الصيغة المدعومة دلوقتي: Markdown (.md) بس."
+_UNSUPPORTED_FILE_MESSAGE = "الصيغ المدعومة: PDF، DOCX، Markdown (.md)، أو TXT."
 _TOO_LARGE_MESSAGE = "الملف أكبر من الحد المسموح (20 MB)."
-_INVALID_ENCODING_MESSAGE = "الملف مش نص UTF-8 صالح."
 _NO_CHANGES_MESSAGE = "مفيش تغييرات في الطلب."
 _DUPLICATE_VERSION_MESSAGE = "النسخة دي موجودة بالفعل لنفس المستند."
 _DOC_ID_MISMATCH_MESSAGE = "الـdoc_id في الملف مش مطابق للمستند اللي بيتم استبداله."
 _SOURCE_MISSING_MESSAGE = "ملف المصدر مش متاح لإعادة المعالجة."
 _STORAGE_FAILED_MESSAGE = "فشل تخزين الملف — جرب تاني."
 
-_ALLOWED_SOURCE_EXTENSIONS = {".md"}
+_ALLOWED_SOURCE_EXTENSIONS = set(SUPPORTED_EXTENSIONS)
+
+
+class _PreparedUpload(NamedTuple):
+    """ملف متحقق منه جاهز للتخزين — البايتات + الهوية المحللة + اسم الملف الأصلي."""
+
+    raw_bytes: bytes
+    parsed: ParsedDocument
+    filename: str
+
+
+def _prepare_upload(file: UploadFile) -> _PreparedUpload:
+    """تحقق الصيغة/الحجم/المحتوى مرة واحدة — الناتج بيتقاسم بين مسارات الرفع والاستبدال."""
+    filename = file.filename or ""
+    raw_bytes = _read_upload(file)
+    return _PreparedUpload(raw_bytes=raw_bytes, parsed=_resolve_or_422(filename, raw_bytes), filename=filename)
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    """تحقق الصيغة/الحجم ثم يرجّع البايتات — القراءة مرة واحدة."""
+    filename = file.filename or ""
+    extension = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
+    if extension not in _ALLOWED_SOURCE_EXTENSIONS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_UNSUPPORTED_FILE_MESSAGE)
+
+    raw = file.file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_TOO_LARGE_MESSAGE)
+    return raw
+
+
+def _resolve_or_422(filename: str, raw: bytes) -> ParsedDocument:
+    """استخراج النص + بناء الهوية — Markdown بـfrontmatter، وباقي الصيغ هوية تلقائية."""
+    extension = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
+    try:
+        text = extract_text(extension, raw)
+        if extension == ".md":
+            return parse_markdown_document(text)
+        return document_from_plain_text(Path(filename).stem, text)
+    except (UnsupportedFormatError, ExtractionError, MissingFrontmatterError, EmptyDocumentError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
 
 class DocumentPatch(BaseModel):
@@ -74,36 +121,11 @@ class DocumentPatch(BaseModel):
 
 
 def _validate_category(category: str) -> str:
-    if category not in ROLE_ALLOWED_CATEGORIES:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_INVALID_CATEGORY_MESSAGE)
+    # الرفع الإداري بيقبل أي category معروفة (اختيار يدوي من القائمة الكاملة
+    # حسب PRD 10.5-ب) — قيود الدور للاسترجاع (ROLE_ALLOWED_CATEGORIES) مش هنا.
+    if category not in ALL_CATEGORIES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_INVALID_CATEGORY_MESSAGE)
     return category
-
-
-def _read_upload(file: UploadFile) -> tuple[str, bytes]:
-    """تحقق الصيغة/الحجم/الترميز ثم يرجّع (النص، البايتات الأصلية) — البايتات
-    بتترفع للـStorage زي ما هي، النص بيتparse. القراءة مرة واحدة."""
-    filename = file.filename or ""
-    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if f".{extension}" not in _ALLOWED_SOURCE_EXTENSIONS:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_UNSUPPORTED_FILE_MESSAGE)
-
-    raw = file.file.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_TOO_LARGE_MESSAGE)
-
-    try:
-        return raw.decode("utf-8"), raw
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_INVALID_ENCODING_MESSAGE
-        ) from exc
-
-
-def _parse_or_422(raw_text: str):
-    try:
-        return parse_markdown_document(raw_text)
-    except (MissingFrontmatterError, EmptyDocumentError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 def _assert_not_processing(document: document_store.DocumentSummary) -> None:
@@ -159,12 +181,25 @@ def upload_document(
 ) -> document_store.DocumentSummary:
     """رفع مستند جديد — الـcategory اختيار يدوي من الـadmin (PRD 10.5-ب)."""
     _validate_category(category)
-    raw_text, raw_bytes = _read_upload(file)
-    parsed = _parse_or_422(raw_text)
+    prepared = _prepare_upload(file)
+    parsed = prepared.parsed
     if document_store.find_document_id_by_version(parsed.doc_id, parsed.version):
         # نفس doc_id+version مسجل بالفعل — الرفع المكرر بيعمل نسختين active
         # فتدخل chunks مكررة في الـretrieval (PRD قسم 7: تضارب النسخ).
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_DUPLICATE_VERSION_MESSAGE)
+
+    # Auto-replace (قرار 2026-11-17): رفع ملف هويته التلقائية موجودة بالفعل =
+    # تحديث للنسخة الموجودة مش مستند جديد منفصل — ده التوقع الطبيعي للأدمن
+    # («اختار الملف المحدّث يتحّط مكان القديم»)، وبيمنع نسختين active لنفس
+    # الهوية يتلمّوا في الـretrieval. الـcategory المختارة في المودال هي اللي
+    # بتتنفذ (الأدمن شافها واختارها بوعي).
+    if parsed.auto_identity:
+        existing = document_store.find_latest_document_by_doc_id(parsed.doc_id)
+        if existing is not None:
+            _assert_not_processing(existing)
+            return _create_replacement_version(
+                admin, background_tasks, existing, prepared, category=category
+            )
 
     path = storage_path(parsed.doc_id, parsed.version, file.filename or "")
     try:
@@ -218,7 +253,7 @@ def patch_document(
     _assert_not_processing(document)
 
     if patch.category is None and patch.status is None:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_NO_CHANGES_MESSAGE)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_NO_CHANGES_MESSAGE)
 
     if patch.category and patch.category != document.category:
         _validate_category(patch.category)
@@ -236,6 +271,44 @@ def patch_document(
     return updated
 
 
+def _create_replacement_version(
+    admin: AuthenticatedUser,
+    background_tasks: BackgroundTasks,
+    target: document_store.DocumentSummary,
+    prepared: _PreparedUpload,
+    category: str,
+) -> document_store.DocumentSummary:
+    """الجزء المشترك بين الاستبدال الصريح والـauto-replace: نسخة جديدة بنفس
+    الهوية، والقديمة تتقفل inactive لما المعالجة تنجح (قرار 2026-11-08).
+    الـaudit للاستبدال بيتسجل على نسخة الـtarget نفسها (PRD 10.5-د)."""
+    if document_store.find_document_id_by_version(target.doc_id, prepared.parsed.version):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_DUPLICATE_VERSION_MESSAGE)
+
+    path = storage_path(target.doc_id, prepared.parsed.version, prepared.filename)
+    try:
+        upload_document_file(get_supabase(), path, prepared.raw_bytes)
+    except StorageException as exc:
+        logger.exception("رفع الملف للـStorage فشل: %s", path)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORAGE_FAILED_MESSAGE) from exc
+
+    new_id = document_store.create_document(
+        doc_id=target.doc_id,
+        title=prepared.parsed.title,
+        category=category,
+        version=prepared.parsed.version,
+        language=prepared.parsed.language,
+        source_path=path,
+        uploaded_by=admin.user_id,
+    )
+    audit_store.record_audit(admin.user_id, "replace", "document", target.id)
+    background_tasks.add_task(_run_replace_processing, new_id, target.doc_id, category, prepared.parsed.body)
+
+    summary = document_store.find_document(new_id)
+    if summary is None:  # pragma: no cover — الصف اتعمل للتو في نفس الـrequest
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_MESSAGE)
+    return summary
+
+
 @router.post("/{document_id}/replace", response_model=document_store.DocumentSummary, status_code=status.HTTP_201_CREATED)
 def replace_document(
     admin: Annotated[AuthenticatedUser, Depends(require_admin)],
@@ -250,37 +323,17 @@ def replace_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_MESSAGE)
     _assert_not_processing(target)
 
-    raw_text, raw_bytes = _read_upload(file)
-    parsed = _parse_or_422(raw_text)
-    if parsed.doc_id != target.doc_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_DOC_ID_MISMATCH_MESSAGE)
-    if document_store.find_document_id_by_version(target.doc_id, parsed.version):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_DUPLICATE_VERSION_MESSAGE)
+    prepared = _prepare_upload(file)
+    # الصيغ غير الـMarkdown بياخدوا هوية تلقائية من اسم الملف — في الاستبدال
+    # الهوية بتتبث من النسخة القديمة (target) مهما اختلف اسم الملف الجديد.
+    effective_doc_id = target.doc_id if prepared.parsed.auto_identity else prepared.parsed.doc_id
+    if effective_doc_id != target.doc_id:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_DOC_ID_MISMATCH_MESSAGE)
 
-    path = storage_path(target.doc_id, parsed.version, file.filename or "")
-    try:
-        upload_document_file(get_supabase(), path, raw_bytes)
-    except StorageException as exc:
-        logger.exception("رفع الملف للـStorage فشل: %s", path)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_STORAGE_FAILED_MESSAGE) from exc
-
-    new_id = document_store.create_document(
-        doc_id=target.doc_id,
-        title=parsed.title,
+    return _create_replacement_version(
+        admin, background_tasks, target, prepared,
         category=target.category,  # الـcategory بتاع المستند الحالي هو المرجع
-        version=parsed.version,
-        language=parsed.language,
-        source_path=path,
-        uploaded_by=admin.user_id,
     )
-    # الـaudit للاستبدال على الـtarget الأصلي (PRD 10.5-د: سجل الاستبدال على المستند القديم).
-    audit_store.record_audit(admin.user_id, "replace", "document", document_id)
-    background_tasks.add_task(_run_replace_processing, new_id, target.doc_id, target.category, parsed.body)
-
-    summary = document_store.find_document(new_id)
-    if summary is None:  # pragma: no cover — الصف اتعمل للتو في نفس الـrequest
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND_MESSAGE)
-    return summary
 
 
 @router.post("/{document_id}/reprocess", response_model=document_store.DocumentSummary)
@@ -297,24 +350,28 @@ def reprocess_document(
     _assert_not_processing(document)
 
     if not document.source_path:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_SOURCE_MISSING_MESSAGE)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_SOURCE_MISSING_MESSAGE)
 
     try:
         raw = read_document_file(get_supabase(), document.source_path)
     except (StorageException, OSError) as exc:
         logger.exception("قراية مصدر المستند فشلت: %s", document.source_path)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_SOURCE_MISSING_MESSAGE
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_SOURCE_MISSING_MESSAGE
         ) from exc
 
+    # إعادة الاستخراج من المصدر بنفس امتداد الملف المحفوظ (النص نفسه كمان
+    # بيتحفظ من المسار في الـlegacy) — فشل الاستخراج/التحليل = 422 وواضح.
+    source_extension = f".{(document.source_path.rsplit('.', 1)[-1] or '').lower()}"
     try:
-        raw_text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_INVALID_ENCODING_MESSAGE
-        ) from exc
+        raw_text = extract_text(source_extension, raw)
+        if source_extension == ".md":
+            parsed = parse_markdown_document(raw_text)
+        else:
+            parsed = document_from_plain_text(Path(document.source_path).stem, raw_text)
+    except (UnsupportedFormatError, ExtractionError, MissingFrontmatterError, EmptyDocumentError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    parsed = _parse_or_422(raw_text)
     document_store.set_document_status(document_id, "processing")
     audit_store.record_audit(admin.user_id, "reprocess", "document", document_id)
     background_tasks.add_task(_run_processing, document_id, document.category, parsed.body)
